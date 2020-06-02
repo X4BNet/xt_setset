@@ -1,0 +1,75 @@
+# Edit Makefile.in and run ./configure
+
+KVERSION = @KVERSION@
+KDIR = @KDIR@
+KINSTDIR = $(shell dirname @KDIR@)
+KOPTS = @KOPTS@
+IPTABLES_CFLAGS = @IPTABLES_CFLAGS@
+IPTABLES_MODULES = @IPTABLES_MODULES@
+DEPMOD = /sbin/depmod -a $(KVERSION)
+CARGS = @CARGS@
+CC = gcc
+
+# https://www.kernel.org/doc/Documentation/kbuild/modules.txt
+# https://www.kernel.org/doc/Documentation/kbuild/makefiles.txt
+obj-m = xt_setset.o
+ccflags-y = @KOPTS@
+
+all: xt_setset.ko libxt_setset.so
+
+xt_setset.ko: xt_setset.c Makefile
+	@echo Compiling for kernel $(KVERSION)
+	make -C $(KDIR) M=$(CURDIR) modules CONFIG_DEBUG_INFO=y
+	@touch $@
+	
+sparse: | xt_setset.c Makefile
+	@rm -f xt_setset.ko xt_setset.o
+	@echo Compiling for kernel $(KVERSION)
+	make -C $(KDIR) M=$(CURDIR) modules C=1
+	@touch xt_setset.ko
+minstall: | xt_setset.ko
+	@echo " *"
+	make -C $(KDIR) M=$(CURDIR) modules_install INSTALL_MOD_PATH=$(DESTDIR)
+	$(DEPMOD)
+mclean:
+	make -C $(KDIR) M=$(CURDIR) clean
+lclean:
+	-rm -f *.so *_sh.o
+clean: mclean lclean
+	-rm -f *.so *.o modules.order
+
+libxt_setset_sh.o: libxt_setset.c
+	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_setset.c
+
+%.so: %_sh.o
+	gcc -shared -o $@ $<
+
+linstall: | libxt_setset.so
+	@echo " *"
+	install -D libxt_setset.so $(DESTDIR)$(IPTABLES_MODULES)/libxt_setset.so
+
+dinstall:
+	@echo " *"
+	@./install-dkms.sh --install
+
+install: minstall linstall
+
+uninstall:
+	-rm -f $(DESTDIR)$(IPTABLES_MODULES)/libxt_setset.so
+	@if [ "@DKMSINSTALL@" = dinstall ]; then ./install-dkms.sh --uninstall; fi
+	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_setset.ko
+
+Makefile: Makefile.in configure
+	./configure --make ${CARGS}
+
+load: all
+	-insmod xt_setset.ko
+
+unload:
+	-rmmod xt_setset.ko
+
+reload: unload load
+
+ChangeLog:
+	gitlog-to-changelog > ChangeLog
+.PHONY: ChangeLog
