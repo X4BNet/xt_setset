@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <xtables.h>
+#include "xt_setset.h"
 
 #define SET_TARGET_ADD		0x1
 #define SET_TARGET_DEL		0x2
@@ -30,7 +31,8 @@ setset_match_help(void)
 	printf("setset match options:\n"
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
-	       " --ss-map-set name flags"
+	       " --ss-map-set name flags\n"
+			" [--ss-match] \n"
 	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
 	       "		where flags are the comma separated list of\n"
@@ -41,7 +43,8 @@ enum {
 	O_ADD_SET,
 	O_DEL_SET,
 	O_EXIST,
-	O_TIMEOUT
+	O_TIMEOUT,
+	O_MATCH
 };
 
 static const struct xt_option_entry setset_match_opts[] = {
@@ -53,6 +56,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-map-mark",	.has_arg = false, .id = '6'},
 	{.name = "ss-map-prio",	.has_arg = false, .id = '7'},
 	{.name = "ss-map-queue",	.has_arg = false, .id = '8'}*/
+	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
 	XTOPT_TABLEEND,
 };
 
@@ -242,8 +246,8 @@ setset_match_check(unsigned int flags)
 static void
 setset_match_init(struct xt_entry_match *target)
 {
-	struct xt_set_info_target_v3 *info =
-		(struct xt_set_info_target_v3 *) target->data;
+	struct xt_setset_info_target *info =
+		(struct xt_setset_info_target *) target->data;
 
 	info->add_set.index = info->del_set.index = info->map_set.index = IPSET_INVALID_ID;
 	info->timeout = UINT32_MAX;
@@ -276,8 +280,8 @@ static int
 setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 		    const void *entry, struct xt_entry_match **target)
 {
-	struct xt_set_info_target_v3 *myinfo =
-		(struct xt_set_info_target_v3 *) (*target)->data;
+	struct xt_setset_info_target *myinfo =
+		(struct xt_setset_info_target *) (*target)->data;
 	unsigned int timeout;
 
 	switch (c) {
@@ -300,6 +304,12 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 				      "or out of range 0-%u", UINT32_MAX - 1);
 		myinfo->timeout = timeout;
 		*flags |= SET_TARGET_TIMEOUT;
+		break;
+	case O_MATCH:
+		myinfo->ssflags |= SS_MATCH;
+		if(invert){
+			myinfo->flags |= IPSET_INV_MATCH;
+		}
 		break;
 	}
 	return 1;
@@ -327,7 +337,7 @@ static void
 setset_match_print(const void *ip, const struct xt_entry_match *target,
 		    int numeric)
 {
-	const struct xt_set_info_target_v3 *info = (const void *)target->data;
+	const struct xt_setset_info_target *info = (const void *)target->data;
 
 	print_match("ss-add-set", &info->add_set);
 	if (info->flags & IPSET_FLAG_EXIST)
@@ -342,12 +352,16 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 		printf(" ss-map-prio");
 	if (info->flags & IPSET_FLAG_MAP_SKBQUEUE)
 		printf(" ss-map-queue");
+	if(info->ssflags & SS_MATCH)
+		printf(" ss-match");
+	if(info->flags & IPSET_INV_MATCH)
+		printf("-inv");
 }
 
 static void
 setset_match_save(const void *ip, const struct xt_entry_match *target)
 {
-	const struct xt_set_info_target_v3 *info = (const void *)target->data;
+	const struct xt_setset_info_target *info = (const void *)target->data;
 
 	print_match("--ss-add-set", &info->add_set);
 	if (info->flags & IPSET_FLAG_EXIST)
@@ -362,6 +376,10 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 		printf(" --ss-map-prio");
 	if (info->flags & IPSET_FLAG_MAP_SKBQUEUE)
 		printf(" --ss-map-queue");
+	if (info->flags & IPSET_INV_MATCH)
+		printf(" !");
+	if (info->ssflags & SS_MATCH)
+		printf(" --ss-match");
 }
 
 static struct xtables_match setset_match[] = {
@@ -370,8 +388,8 @@ static struct xtables_match setset_match[] = {
 		.revision	= 0,
 		.version	= XTABLES_VERSION,
 		.family		= NFPROTO_UNSPEC,
-		.size		= XT_ALIGN(sizeof(struct xt_set_info_target_v3)),
-		.userspacesize	= XT_ALIGN(sizeof(struct xt_set_info_target_v3)),
+		.size		= XT_ALIGN(sizeof(struct xt_setset_info_target)),
+		.userspacesize	= XT_ALIGN(sizeof(struct xt_setset_info_target)),
 		.init       = setset_match_init,
 		.help		= setset_match_help,
 		.parse		= setset_match_parse,

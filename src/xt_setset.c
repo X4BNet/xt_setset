@@ -13,6 +13,7 @@
 
 #include <linux/netfilter/xt_set.h>
 #include <linux/netfilter/x_tables.h>
+#include "xt_setset.h"
 
 MODULE_AUTHOR("Mathew Heard <mheard@x4b.net>");
 MODULE_DESCRIPTION("Xtables: Additional ipset matches");
@@ -48,9 +49,9 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 static bool
 setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 {
-	const struct xt_set_info_target_v3 *info = par->targinfo;
+	const struct xt_setset_info_target *info = par->targinfo;
 	struct sk_buff *skb = (struct sk_buff *)_skb;
-	int ret;
+	int ret = 1;
 
 	ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
 		info->add_set.flags, info->flags, info->timeout,
@@ -58,43 +59,34 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 	ADT_OPT(del_opt, xt_family(par), info->del_set.dim,
 		info->del_set.flags, 0, UINT_MAX,
 		0, 0, 0, 0);
-	ADT_OPT(map_opt, xt_family(par), info->map_set.dim,
-		info->map_set.flags, 0, UINT_MAX,
-		0, 0, 0, 0);
+		
+	if (info->ssflags & SS_MATCH) {
+		ret = match_set(info->add_set.index, skb, par, &add_opt,
+				info->flags & IPSET_INV_MATCH);
+	}
 
 	/* Normalize to fit into jiffies */
 	if (add_opt.ext.timeout != IPSET_NO_TIMEOUT &&
 	    add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
 		add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
-	if (info->add_set.index != IPSET_INVALID_ID)
-		ip_set_add(info->add_set.index, skb, par, &add_opt);
-	if (info->del_set.index != IPSET_INVALID_ID)
-		ip_set_del(info->del_set.index, skb, par, &del_opt);
-	if (info->map_set.index != IPSET_INVALID_ID) {
-		map_opt.cmdflags |= info->flags & (IPSET_FLAG_MAP_SKBMARK |
-						   IPSET_FLAG_MAP_SKBPRIO |
-						   IPSET_FLAG_MAP_SKBQUEUE);
-		ret = match_set(info->map_set.index, skb, par, &map_opt,
-				info->map_set.flags & IPSET_INV_MATCH);
-		if (!ret)
-			return true;
-		if (map_opt.cmdflags & IPSET_FLAG_MAP_SKBMARK)
-			skb->mark = (skb->mark & ~MOPT(map_opt,skbmarkmask))
-				    ^ MOPT(map_opt, skbmark);
-		if (map_opt.cmdflags & IPSET_FLAG_MAP_SKBPRIO)
-			skb->priority = MOPT(map_opt, skbprio);
-		if ((map_opt.cmdflags & IPSET_FLAG_MAP_SKBQUEUE) &&
-		    skb->dev &&
-		    skb->dev->real_num_tx_queues > MOPT(map_opt, skbqueue))
-			skb_set_queue_mapping(skb, MOPT(map_opt, skbqueue));
+	if (info->add_set.index != IPSET_INVALID_ID) {
+		if(ret || !(info->ssflags & SS_MATCH))
+			ip_set_add(info->add_set.index, skb, par, &add_opt);
 	}
-	return true;
+	if (ret && info->del_set.index != IPSET_INVALID_ID)
+		ip_set_del(info->del_set.index, skb, par, &del_opt);
+
+	
+	if(!(info->ssflags & SS_MATCH)){
+		ret = 1;
+	}
+	return ret;
 }
 
 static int
 setset_match_checkentry(const struct xt_mtchk_param *par)
 {
-	struct xt_set_info_target_v3 *info = par->matchinfo;
+	struct xt_setset_info_target *info = par->matchinfo;
 	ip_set_id_t index;
 	int ret = 0;
 
@@ -168,7 +160,7 @@ cleanup_add:
 static void
 setset_match_destroy(const struct xt_mtdtor_param *par)
 {
-	struct xt_set_info_target_v3 *info = par->matchinfo;
+	struct xt_setset_info_target *info = par->matchinfo;
 
 	if (info->add_set.index != IPSET_INVALID_ID)
 		ip_set_nfnl_put(par->net, info->add_set.index);
@@ -185,7 +177,7 @@ static struct xt_match setset_mt_reg[] __read_mostly = {
 		.family		= NFPROTO_IPV4,
 		.revision	= 0,
 		.match		= setset_match,
-		.matchsize	= sizeof(struct xt_set_info_target_v3),
+		.matchsize	= sizeof(struct xt_setset_info_target),
 		.checkentry	= setset_match_checkentry,
 		.destroy	= setset_match_destroy,
 		.me		= THIS_MODULE
@@ -195,7 +187,7 @@ static struct xt_match setset_mt_reg[] __read_mostly = {
 		.family		= NFPROTO_IPV6,
 		.revision	= 0,
 		.match		= setset_match,
-		.matchsize	= sizeof(struct xt_set_info_target_v3),
+		.matchsize	= sizeof(struct xt_setset_info_target),
 		.checkentry	= setset_match_checkentry,
 		.destroy	= setset_match_destroy,
 		.me		= THIS_MODULE

@@ -4,9 +4,9 @@
 
 match module that does the job of `-j SET`
 
-## xt_setbump
+match module can be used to bump the timeout (ipset can now be an xt_recent replacement) using the `--ss-exist` flag
 
-match module that also bumps the timeout (ipset can now be an xt_recent replacement)
+Returns on match if `--ss-match` flag provided
 
 ## xt_setban
 
