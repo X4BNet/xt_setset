@@ -31,7 +31,6 @@ setset_match_help(void)
 	printf("setset match options:\n"
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
-	       " --ss-map-set name flags\n"
 			" [--ss-match] \n"
 	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
@@ -249,7 +248,7 @@ setset_match_init(struct xt_entry_match *target)
 	struct xt_setset_info_target *info =
 		(struct xt_setset_info_target *) target->data;
 
-	info->add_set.index = info->del_set.index = info->map_set.index = IPSET_INVALID_ID;
+	info->add_set.index = info->del_set.index = IPSET_INVALID_ID;
 	info->timeout = UINT32_MAX;
 }
 
@@ -286,11 +285,11 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 
 	switch (c) {
 	case O_ADD_SET:		/* --add-set <set> <flags> */
-		parse_target(argv, invert, &myinfo->add_set, "add-set");
+		parse_target(argv, invert, &myinfo->add_set, "ss-add-set");
 		*flags |= SET_TARGET_ADD;
 		break;
 	case O_DEL_SET:		/* --del-set <set>[:<flags>] <flags> */
-		parse_target(argv, invert, &myinfo->del_set, "del-set");
+		parse_target(argv, invert, &myinfo->del_set, "ss-del-set");
 		*flags |= SET_TARGET_DEL;
 		break;
 	case O_EXIST:
@@ -320,6 +319,9 @@ print_match(const char *prefix, const struct xt_set_info *info)
 {
 	int i;
 	char setname[IPSET_MAXNAMELEN];
+	
+	if (info->index == IPSET_INVALID_ID)
+		return;
 
 	get_set_byid(setname, info->index);
 	printf("%s %s %s",
@@ -345,7 +347,6 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 	if (info->timeout != UINT32_MAX)
 		printf(" ss-timeout %u", info->timeout);
 	print_match("ss-del-set", &info->del_set);
-	print_match("ss-map-set", &info->map_set);
 	if (info->flags & IPSET_FLAG_MAP_SKBMARK)
 		printf(" ss-map-mark");
 	if (info->flags & IPSET_FLAG_MAP_SKBPRIO)
@@ -369,7 +370,6 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 	if (info->timeout != UINT32_MAX)
 		printf(" --ss-timeout %u", info->timeout);
 	print_match("--ss-del-set", &info->del_set);
-	print_match("--ss-map-set", &info->map_set);
 	if (info->flags & IPSET_FLAG_MAP_SKBMARK)
 		printf(" --ss-map-mark");
 	if (info->flags & IPSET_FLAG_MAP_SKBPRIO)

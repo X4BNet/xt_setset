@@ -111,43 +111,15 @@ setset_match_checkentry(const struct xt_mtchk_param *par)
 		}
 	}
 
-	if (info->map_set.index != IPSET_INVALID_ID) {
-		if (strncmp(par->table, "mangle", 7)) {
-			pr_info_ratelimited("--map-set only usable from mangle table\n");
-			ret = -EINVAL;
-			goto cleanup_del;
-		}
-		if (((info->flags & IPSET_FLAG_MAP_SKBPRIO) |
-		     (info->flags & IPSET_FLAG_MAP_SKBQUEUE)) &&
-		     (par->hook_mask & ~(1 << NF_INET_FORWARD |
-					 1 << NF_INET_LOCAL_OUT |
-					 1 << NF_INET_POST_ROUTING))) {
-			pr_info_ratelimited("mapping of prio or/and queue is allowed only from OUTPUT/FORWARD/POSTROUTING chains\n");
-			ret = -EINVAL;
-			goto cleanup_del;
-		}
-		index = ip_set_nfnl_get_byindex(par->net,
-						info->map_set.index);
-		if (index == IPSET_INVALID_ID) {
-			pr_info_ratelimited("Cannot find map_set index %u as target\n",
-					    info->map_set.index);
-			ret = -ENOENT;
-			goto cleanup_del;
-		}
-	}
 
 	if (info->add_set.dim > IPSET_DIM_MAX ||
-	    info->del_set.dim > IPSET_DIM_MAX ||
-	    info->map_set.dim > IPSET_DIM_MAX) {
+	    info->del_set.dim > IPSET_DIM_MAX) {
 		pr_info_ratelimited("SET target dimension over the limit!\n");
 		ret = -ERANGE;
-		goto cleanup_mark;
+		goto cleanup_del;
 	}
 
 	return 0;
-cleanup_mark:
-	if (info->map_set.index != IPSET_INVALID_ID)
-		ip_set_nfnl_put(par->net, info->map_set.index);
 cleanup_del:
 	if (info->del_set.index != IPSET_INVALID_ID)
 		ip_set_nfnl_put(par->net, info->del_set.index);
@@ -166,8 +138,6 @@ setset_match_destroy(const struct xt_mtdtor_param *par)
 		ip_set_nfnl_put(par->net, info->add_set.index);
 	if (info->del_set.index != IPSET_INVALID_ID)
 		ip_set_nfnl_put(par->net, info->del_set.index);
-	if (info->map_set.index != IPSET_INVALID_ID)
-		ip_set_nfnl_put(par->net, info->map_set.index);
 }
 
 
