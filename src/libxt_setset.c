@@ -32,7 +32,7 @@ setset_match_help(void)
 	printf("setset match options:\n"
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
-			" [--ss-match] [--ss-nth nth]\n"
+			" [--ss-match] [--ss-probability nth]\n"
 	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
 	       "		where flags are the comma separated list of\n"
@@ -45,7 +45,7 @@ enum {
 	O_EXIST,
 	O_TIMEOUT,
 	O_MATCH,
-	O_NTH
+	O_PROBABILITY
 };
 
 static const struct xt_option_entry setset_match_opts[] = {
@@ -58,7 +58,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-map-prio",	.has_arg = false, .id = '7'},
 	{.name = "ss-map-queue",	.has_arg = false, .id = '8'}*/
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
-	{.name = "ss-nth",	.type = XTTYPE_UINT32, .id = O_NTH},
+	{.name = "ss-probability",	.type = XTTYPE_UINT32, .id = O_PROBABILITY},
 	XTOPT_TABLEEND,
 };
 
@@ -313,8 +313,8 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 			myinfo->flags |= IPSET_INV_MATCH;
 		}
 		break;
-	case O_NTH:
-  		myinfo->nth = lround(0x80000000 * strtod(optarg, NULL));
+	case O_PROBABILITY:
+  		myinfo->probability = lround(0x80000000 * strtod(optarg, NULL));
 		break;
 	}
 	return 1;
@@ -363,6 +363,9 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 		printf(" ss-match");
 	if(info->flags & IPSET_INV_MATCH)
 		printf("-inv");
+	if(info->nth != 0)
+		printf(" ss-probability %.11f", 
+		       1.0 * info->probability / 0x80000000);
 }
 
 static void
@@ -386,6 +389,9 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 		printf(" !");
 	if (info->ssflags & SS_MATCH)
 		printf(" --ss-match");
+	if(info->nth != 0)
+		printf(" --ss-probability %.11f", 
+		       1.0 * info->probability / 0x80000000);
 }
 
 static struct xtables_match setset_match[] = {
