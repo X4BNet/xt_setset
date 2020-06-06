@@ -48,7 +48,7 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 
 static inline bool
 setset_nth(__u32 nth){
-	return (random32() & 0x7FFFFFFF) < nth;
+	return (prandom_u32() & 0x7FFFFFFF) < nth;
 }
 
 static bool
