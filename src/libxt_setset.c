@@ -293,7 +293,7 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 	case O_MATCH:
 		myinfo->ssflags |= SS_MATCH;
 		if(invert){
-			myinfo->flags |= IPSET_INV_MATCH;
+			myinfo->ssflags |= SS_INV;
 		}
 		break;
 	case O_PROBABILITY:
@@ -314,7 +314,7 @@ print_match(const char *prefix, const struct xt_set_info *info)
 
 	get_set_byid(setname, info->index);
 	printf("%s %s %s",
-	       (info->flags & IPSET_INV_MATCH) ? " !" : "",
+	       (info->ssflags & SS_INV) ? " !" : "",
 	       prefix,
 	       setname); 
 	for (i = 1; i <= info->dim; i++) {		
@@ -344,7 +344,7 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 		printf(" ss-map-queue");
 	if(info->ssflags & SS_MATCH)
 		printf(" ss-match");
-	if(info->flags & IPSET_INV_MATCH)
+	if(info->ssflags & SS_INV)
 		printf("-inv");
 	if(info->probability != 0)
 		printf(" ss-probability %.11f", 
@@ -368,7 +368,7 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 		printf(" --ss-map-prio");
 	if (info->flags & IPSET_FLAG_MAP_SKBQUEUE)
 		printf(" --ss-map-queue");
-	if (info->flags & IPSET_INV_MATCH)
+	if (info->ssflags & SS_INV)
 		printf(" !");
 	if (info->ssflags & SS_MATCH)
 		printf(" --ss-match");

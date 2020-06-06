@@ -64,7 +64,7 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 		
 	if (info->ssflags & SS_MATCH) {
 		ret = match_set(info->add_set.index, skb, par, &add_opt,
-				info->flags & IPSET_INV_MATCH);
+				info->ssflags & SS_INV);
 	}
 
 	if (info->add_set.index != IPSET_INVALID_ID && (ret || !(info->ssflags & SS_MATCH)) && setset_probability(info->probability)) {
@@ -75,7 +75,7 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 		ip_set_add(info->add_set.index, skb, par, &add_opt);
 	}
 
-	if (ret && info->del_set.index != IPSET_INVALID_ID){
+	if (unlikely(ret && info->del_set.index != IPSET_INVALID_ID)){
 		ADT_OPT(del_opt, xt_family(par), info->del_set.dim,
 			info->del_set.flags, 0, UINT_MAX,
 			0, 0, 0, 0);
