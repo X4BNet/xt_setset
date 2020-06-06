@@ -31,7 +31,7 @@ setset_match_help(void)
 	printf("setset match options:\n"
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
-			" [--ss-match] \n"
+			" [--ss-match] [--ss-nth nth]\n"
 	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
 	       "		where flags are the comma separated list of\n"
@@ -43,7 +43,8 @@ enum {
 	O_DEL_SET,
 	O_EXIST,
 	O_TIMEOUT,
-	O_MATCH
+	O_MATCH,
+	O_NTH
 };
 
 static const struct xt_option_entry setset_match_opts[] = {
@@ -56,6 +57,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-map-prio",	.has_arg = false, .id = '7'},
 	{.name = "ss-map-queue",	.has_arg = false, .id = '8'}*/
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
+	{.name = "ss-nth",	.type = XTTYPE_UINT32, .id = O_NTH},
 	XTOPT_TABLEEND,
 };
 
@@ -309,6 +311,9 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 		if(invert){
 			myinfo->flags |= IPSET_INV_MATCH;
 		}
+		break;
+	case O_NTH:
+  		myinfo->nth = lround(0x80000000 * strtod(optarg));
 		break;
 	}
 	return 1;

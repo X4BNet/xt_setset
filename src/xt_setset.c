@@ -46,35 +46,42 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 	return inv;
 }
 
+static inline bool
+setset_nth(__u32 nth){
+	return (net_random() & 0x7FFFFFFF) < nth;
+}
+
 static bool
 setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 {
 	const struct xt_setset_info_target *info = par->targinfo;
 	struct sk_buff *skb = (struct sk_buff *)_skb;
 	int ret = 1;
-
-	ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
-		info->add_set.flags, info->flags, info->timeout,
-		0, 0, 0, 0);
-	ADT_OPT(del_opt, xt_family(par), info->del_set.dim,
-		info->del_set.flags, 0, UINT_MAX,
-		0, 0, 0, 0);
 		
 	if (info->ssflags & SS_MATCH) {
 		ret = match_set(info->add_set.index, skb, par, &add_opt,
 				info->flags & IPSET_INV_MATCH);
 	}
 
-	/* Normalize to fit into jiffies */
-	if (add_opt.ext.timeout != IPSET_NO_TIMEOUT &&
-	    add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
-		add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
-	if (info->add_set.index != IPSET_INVALID_ID) {
-		if(ret || !(info->ssflags & SS_MATCH))
-			ip_set_add(info->add_set.index, skb, par, &add_opt);
+	if (info->add_set.index != IPSET_INVALID_ID && (ret || !(info->ssflags & SS_MATCH)) && setset_nth(info->nth)) {
+		ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
+			info->add_set.flags, info->flags, info->timeout,
+			0, 0, 0, 0);
+
+		/* Normalize to fit into jiffies */
+		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
+			add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
+
+		ip_set_add(info->add_set.index, skb, par, &add_opt);
 	}
-	if (ret && info->del_set.index != IPSET_INVALID_ID)
+
+	if (ret && info->del_set.index != IPSET_INVALID_ID){
+		ADT_OPT(del_opt, xt_family(par), info->del_set.dim,
+			info->del_set.flags, 0, UINT_MAX,
+			0, 0, 0, 0);
+
 		ip_set_del(info->del_set.index, skb, par, &del_opt);
+	}
 
 	
 	if(!(info->ssflags & SS_MATCH)){
