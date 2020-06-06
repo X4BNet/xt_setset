@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <xtables.h>
+#include <math.h>
 #include "xt_setset.h"
 
 #define SET_TARGET_ADD		0x1
@@ -313,7 +314,7 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 		}
 		break;
 	case O_NTH:
-  		myinfo->nth = lround(0x80000000 * strtod(optarg));
+  		myinfo->nth = lround(0x80000000 * strtod(optarg, NULL));
 		break;
 	}
 	return 1;
