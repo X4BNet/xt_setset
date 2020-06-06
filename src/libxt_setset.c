@@ -58,7 +58,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-map-prio",	.has_arg = false, .id = '7'},
 	{.name = "ss-map-queue",	.has_arg = false, .id = '8'}*/
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
-	{.name = "ss-probability",	.type = XTTYPE_UINT32, .id = O_PROBABILITY},
+	{.name = "ss-probability",	.type = XTTYPE_STRING, .id = O_PROBABILITY},
 	XTOPT_TABLEEND,
 };
 
@@ -216,33 +216,16 @@ setset_match_check(unsigned int flags)
 {
 	if (!(flags & (SET_TARGET_ADD|SET_TARGET_DEL|SET_TARGET_MAP)))
 		xtables_error(PARAMETER_PROBLEM,
-			      "You must specify either `--add-set' or "
-			      "`--del-set' or `--map-set'");
+			      "You must specify either `--ss-add-set' or "
+			      "`--ss-del-set'");
 	if (!(flags & SET_TARGET_ADD)) {
 		if (flags & SET_TARGET_EXIST)
 			xtables_error(PARAMETER_PROBLEM,
-				"Flag `--exist' can be used with `--add-set' only");
+				"Flag `--ss-exist' can be used with `--ss-add-set' only");
 		if (flags & SET_TARGET_TIMEOUT)
 			xtables_error(PARAMETER_PROBLEM,
-				"Option `--timeout' can be used with `--add-set' only");
+				"Option `--ss-timeout' can be used with `--ss-add-set' only");
 	}
-	if (!(flags & SET_TARGET_MAP)) {
-		if (flags & SET_TARGET_MAP_MARK)
-			xtables_error(PARAMETER_PROBLEM,
-				"Flag `--map-mark' can be used with `--map-set' only");
-		if (flags & SET_TARGET_MAP_PRIO)
-			xtables_error(PARAMETER_PROBLEM,
-				"Flag `--map-prio' can be used with `--map-set' only");
-		if (flags & SET_TARGET_MAP_QUEUE)
-			xtables_error(PARAMETER_PROBLEM,
-				"Flag `--map-queue' can be used with `--map-set' only");
-	}
-	if ((flags & SET_TARGET_MAP) && !(flags & (SET_TARGET_MAP_MARK |
-						   SET_TARGET_MAP_PRIO |
-						   SET_TARGET_MAP_QUEUE)))
-		xtables_error(PARAMETER_PROBLEM,
-			"You must specify flags `--map-mark' or "
-			"'--map-prio` or `--map-queue'");
 }
 
 static void
