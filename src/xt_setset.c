@@ -10,7 +10,7 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/filter.h>
-
+#include <linux/net.h>
 #include <linux/netfilter/xt_set.h>
 #include <linux/netfilter/x_tables.h>
 #include "xt_setset.h"
@@ -57,6 +57,10 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 	const struct xt_setset_info_target *info = par->targinfo;
 	struct sk_buff *skb = (struct sk_buff *)_skb;
 	int ret = 1;
+
+	ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
+		info->add_set.flags, info->flags, info->timeout,
+		0, 0, 0, 0);
 		
 	if (info->ssflags & SS_MATCH) {
 		ret = match_set(info->add_set.index, skb, par, &add_opt,
@@ -64,10 +68,6 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 	}
 
 	if (info->add_set.index != IPSET_INVALID_ID && (ret || !(info->ssflags & SS_MATCH)) && setset_nth(info->nth)) {
-		ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
-			info->add_set.flags, info->flags, info->timeout,
-			0, 0, 0, 0);
-
 		/* Normalize to fit into jiffies */
 		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
 			add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
