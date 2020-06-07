@@ -269,7 +269,7 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 {
 	struct xt_setset_info_target *myinfo =
 		(struct xt_setset_info_target *) (*target)->data;
-	unsigned int timeout;
+	unsigned int timeout, gt;
 
 	switch (c) {
 	case O_ADD_SET:		/* --add-set <set> <flags> */
@@ -302,11 +302,11 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
   		myinfo->probability = lround(0x80000000 * strtod(optarg, NULL));
 		break;
 	case O_GT:
-		if (!xtables_strtoui(optarg, NULL, &timeout, 0, UINT32_MAX - 1))
+		if (!xtables_strtoui(optarg, NULL, &gt, 0, UINT32_MAX - 1))
 				xtables_error(PARAMETER_PROBLEM,
 						"Invalid value for option --ss-packets-gt "
 						"or out of range 0-%u", UINT32_MAX - 1);
-		myinfo->gt = timeout;
+		myinfo->gt = gt;
 		break;
 	}
 	return 1;
