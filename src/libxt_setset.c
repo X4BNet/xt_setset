@@ -62,7 +62,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-packets-gt",	.type = XTTYPE_UINT32, .id = O_GT},
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
 	{.name = "ss-probability",	.type = XTTYPE_STRING, .id = O_PROBABILITY},
-	{.name = "ss-nocreate",	.type = XTTYPE_STRING, .id = O_NOCREATE},
+	{.name = "ss-nocreate",	.type = XTTYPE_NONE, .id = O_NOCREATE},
 	XTOPT_TABLEEND,
 };
 
