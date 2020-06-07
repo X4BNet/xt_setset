@@ -71,7 +71,8 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 				info->ssflags & SS_INV);
 	}
 
-	if (info->add_set.index != IPSET_INVALID_ID && (ret || !(info->ssflags & SS_MATCH)) && setset_probability(info->probability)) {
+	//(ret || !(info->ssflags & SS_MATCH)) && 
+	if (info->add_set.index != IPSET_INVALID_ID && setset_probability(info->probability)) {
 		/* Normalize to fit into jiffies */
 		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
 			add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
