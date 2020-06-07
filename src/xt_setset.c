@@ -62,16 +62,20 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 		info->add_set.flags, info->flags, info->timeout,
 		0, 0, 0, 0);
 		
-	if (info->ssflags & SS_MATCH) {
+	if (info->ssflags & (SS_MATCH | SS_NOCREATE)) {
 		if(info->gt){
 			add_opt.ext.packets_op = IPSET_COUNTER_GT;
 			add_opt.ext.packets = info->gt;
 		}
-		ret = match_set(info->add_set.index, skb, par, &add_opt,
-				info->ssflags & SS_INV);
+		ret = match_set(info->add_set.index, skb, par, &add_opt, 0);
+
+		if(!ret && info->gt && (info->ssflags & SS_NOCREATE)){
+			add_opt.ext.packets_op = 0;
+			add_opt.ext.packets = 0;
+			ret = match_set(info->add_set.index, skb, par, &add_opt, 0);
+		}
 	}
 
-	//(ret || !(info->ssflags & SS_MATCH)) && 
 	if (info->add_set.index != IPSET_INVALID_ID && setset_probability(info->probability)) {
 		/* Normalize to fit into jiffies */
 		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
@@ -96,6 +100,8 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 	if(!(info->ssflags & SS_MATCH)){
 		ret = 1;
 	}
+
+	if(info->ssflags & SS_INV) return !ret;
 	return ret;
 }
 

@@ -32,7 +32,7 @@ setset_match_help(void)
 	printf("setset match options:\n"
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
-			" [--ss-match] [--ss-probability nth] [--ss-packets-gt pkts]\n"
+			" [--ss-nocreate] [--ss-match] [--ss-probability nth] [--ss-packets-gt pkts]\n"
 	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
 	       "		where flags are the comma separated list of\n"
@@ -46,7 +46,8 @@ enum {
 	O_TIMEOUT,
 	O_MATCH,
 	O_PROBABILITY,
-	O_GT
+	O_GT,
+	O_NOCREATE,
 };
 
 static const struct xt_option_entry setset_match_opts[] = {
@@ -61,6 +62,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-packets-gt",	.type = XTTYPE_UINT32, .id = O_GT},
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
 	{.name = "ss-probability",	.type = XTTYPE_STRING, .id = O_PROBABILITY},
+	{.name = "ss-nocreate",	.type = XTTYPE_STRING, .id = O_NOCREATE},
 	XTOPT_TABLEEND,
 };
 
@@ -300,6 +302,9 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 		break;
 	case O_PROBABILITY:
   		myinfo->probability = lround(0x80000000 * strtod(optarg, NULL));
+		break;
+	case O_NOCREATE:
+  		myinfo->ssflags |= SS_NOCREATE;
 		break;
 	case O_GT:
 		if (!xtables_strtoui(optarg, NULL, &gt, 0, UINT32_MAX - 1))

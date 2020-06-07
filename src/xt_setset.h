@@ -13,5 +13,6 @@ struct xt_setset_info_target {
 
 enum {
 	SS_MATCH = 1,
-	SS_INV=2
+	SS_INV=2,
+	SS_NOCREATE=4
 };
