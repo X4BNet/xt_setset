@@ -56,7 +56,7 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 {
 	const struct xt_setset_info_target *info = par->targinfo;
 	struct sk_buff *skb = (struct sk_buff *)_skb;
-	bool ret = true, found = true;
+	bool ret = true, create = true;
 
 	ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
 		info->add_set.flags, info->flags, info->timeout,
@@ -67,16 +67,20 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 			add_opt.ext.packets_op = IPSET_COUNTER_GT;
 			add_opt.ext.packets = info->gt;
 		}
-		found = ret = match_set(info->add_set.index, skb, par, &add_opt, 0);
+		create = ret = match_set(info->add_set.index, skb, par, &add_opt, 0);
 
-		if(!ret && info->gt && (info->ssflags & SS_NOCREATE)){
-			add_opt.ext.packets_op = 0;
-			add_opt.ext.packets = 0;
-			found = match_set(info->add_set.index, skb, par, &add_opt, 0);
+		if((info->ssflags & SS_NOCREATE)) {
+			if(!create && info->gt){
+				add_opt.ext.packets_op = 0;
+				add_opt.ext.packets = 0;
+				create = match_set(info->add_set.index, skb, par, &add_opt, 0);
+			}
+		}else{
+			create = true;
 		}
 	}
 
-	if (info->add_set.index != IPSET_INVALID_ID && found && setset_probability(info->probability)) {
+	if (info->add_set.index != IPSET_INVALID_ID && create && setset_probability(info->probability)) {
 		/* Normalize to fit into jiffies */
 		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
 			add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
