@@ -32,7 +32,7 @@ setset_match_help(void)
 	printf("setset match options:\n"
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
-			" [--ss-match] [--ss-probability nth]\n"
+			" [--ss-match] [--ss-probability nth] [--ss-packets-gt pkts]\n"
 	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
 	       "		where flags are the comma separated list of\n"
@@ -45,7 +45,8 @@ enum {
 	O_EXIST,
 	O_TIMEOUT,
 	O_MATCH,
-	O_PROBABILITY
+	O_PROBABILITY,
+	O_GT
 };
 
 static const struct xt_option_entry setset_match_opts[] = {
@@ -57,6 +58,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-map-mark",	.has_arg = false, .id = '6'},
 	{.name = "ss-map-prio",	.has_arg = false, .id = '7'},
 	{.name = "ss-map-queue",	.has_arg = false, .id = '8'}*/
+	{.name = "ss-packets-gt",	.type = XTTYPE_UINT32, .id = O_GT},
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
 	{.name = "ss-probability",	.type = XTTYPE_STRING, .id = O_PROBABILITY},
 	XTOPT_TABLEEND,
@@ -299,6 +301,13 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 	case O_PROBABILITY:
   		myinfo->probability = lround(0x80000000 * strtod(optarg, NULL));
 		break;
+	case O_GT:
+		if (!xtables_strtoui(optarg, NULL, &timeout, 0, UINT32_MAX - 1))
+				xtables_error(PARAMETER_PROBLEM,
+						"Invalid value for option --ss-packets-gt "
+						"or out of range 0-%u", UINT32_MAX - 1);
+		myinfo->gt = timeout;
+		break;
 	}
 	return 1;
 }
@@ -348,6 +357,8 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 	if(info->probability != 0)
 		printf(" ss-probability %.11f", 
 		       1.0 * info->probability / 0x80000000);
+	if(info->gt)
+		printf(" ss-packets-gt %u", info->gt);
 }
 
 static void
@@ -374,6 +385,8 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 	if(info->probability != 0)
 		printf(" --ss-probability %.11f", 
 		       1.0 * info->probability / 0x80000000);
+	if(info->gt)
+		printf(" --ss-packets-gt %u", info->gt);
 }
 
 static struct xtables_match setset_match[] = {

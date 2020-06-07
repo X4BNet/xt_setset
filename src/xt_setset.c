@@ -63,6 +63,10 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 		0, 0, 0, 0);
 		
 	if (info->ssflags & SS_MATCH) {
+		if(info->gt){
+			add_opt.ext.packets_op = IPSET_COUNTER_GT;
+			add_opt.ext.packets = info->gt;
+		}
 		ret = match_set(info->add_set.index, skb, par, &add_opt,
 				info->ssflags & SS_INV);
 	}
