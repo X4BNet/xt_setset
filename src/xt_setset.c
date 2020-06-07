@@ -76,6 +76,10 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
 			add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
 
+		if(info->gt){
+			add_opt.ext.packets_op = 0;
+			add_opt.ext.packets = 0;
+		}
 		ip_set_add(info->add_set.index, skb, par, &add_opt);
 	}
 
