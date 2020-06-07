@@ -359,6 +359,8 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 		printf(" ss-match");
 	if(info->ssflags & SS_INV)
 		printf("-inv");
+	if (info->ssflags & SS_NOCREATE)
+		printf(" ss-nocreate");
 	if(info->probability != 0)
 		printf(" ss-probability %.11f", 
 		       1.0 * info->probability / 0x80000000);
@@ -387,6 +389,8 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 		printf(" !");
 	if (info->ssflags & SS_MATCH)
 		printf(" --ss-match");
+	if (info->ssflags & SS_NOCREATE)
+		printf(" --ss-nocreate");
 	if(info->probability != 0)
 		printf(" --ss-probability %.11f", 
 		       1.0 * info->probability / 0x80000000);
