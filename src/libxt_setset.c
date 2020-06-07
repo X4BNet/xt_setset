@@ -313,7 +313,7 @@ print_match(const char *prefix, const struct xt_set_info *info)
 		return;
 
 	get_set_byid(setname, info->index);
-	printf("%s %s",
+	printf(" %s %s",
 	       prefix,
 	       setname); 
 	for (i = 1; i <= info->dim; i++) {		
