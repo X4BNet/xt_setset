@@ -1,3 +1,4 @@
+#define DEBUG 1
 /* Xtables module to match packets using a BPF filter.
  * Copyright 2013 Google Inc.
  * Written by Willem de Bruijn <willemb@google.com>
@@ -48,6 +49,7 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 
 static inline bool
 setset_probability(__u32 nth){
+	if(nth == 0) return true;
 	return (prandom_u32() & 0x7FFFFFFF) < nth;
 }
 
