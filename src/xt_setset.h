@@ -8,6 +8,11 @@ struct xt_setset_info_target {
     __u32 ssflags;
 	__u32 probability;
 	__u32 gt;
+#ifdef __KERNEL__
+	atomic_long_t cooldown;
+#else
+	long cooldown;
+#endif
 };
 
 

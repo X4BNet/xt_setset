@@ -14,6 +14,8 @@
 #include <linux/net.h>
 #include <linux/netfilter/xt_set.h>
 #include <linux/netfilter/x_tables.h>
+#include <uapi/linux/netfilter/ipset/ip_set.h>
+#include <uapi/linux/netfilter/ipset/ip_set_hash.h>
 #include "xt_setset.h"
 
 MODULE_AUTHOR("Mathew Heard <mheard@x4b.net>");
@@ -59,6 +61,7 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 	const struct xt_setset_info_target *info = par->targinfo;
 	struct sk_buff *skb = (struct sk_buff *)_skb;
 	bool ret = true, create = true;
+	int err;
 
 	ADT_OPT(add_opt, xt_family(par), info->add_set.dim,
 		info->add_set.flags, info->flags, info->timeout,
@@ -83,15 +86,20 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 	}
 
 	if (info->add_set.index != IPSET_INVALID_ID && create && setset_probability(info->probability)) {
-		/* Normalize to fit into jiffies */
-		if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
-			add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
+		if(likely(atomic_long_read(&info->cooldown) <= jiffies)){
+			/* Normalize to fit into jiffies */
+			if (add_opt.ext.timeout != IPSET_NO_TIMEOUT && add_opt.ext.timeout > IPSET_MAX_TIMEOUT)
+				add_opt.ext.timeout = IPSET_MAX_TIMEOUT;
 
-		if(info->gt){
-			add_opt.ext.packets_op = 0;
-			add_opt.ext.packets = 0;
+			if(info->gt){
+				add_opt.ext.packets_op = 0;
+				add_opt.ext.packets = 0;
+			}
+			err = ip_set_add(info->add_set.index, skb, par, &add_opt);
+			if(unlikely(err == -IPSET_ERR_HASH_FULL)){
+				atomic_long_set(&info->cooldown, jiffies + HZ);
+			}
 		}
-		ip_set_add(info->add_set.index, skb, par, &add_opt);
 	}
 
 	if (unlikely(ret && info->del_set.index != IPSET_INVALID_ID)){
@@ -146,6 +154,8 @@ setset_match_checkentry(const struct xt_mtchk_param *par)
 		ret = -ERANGE;
 		goto cleanup_del;
 	}
+
+	atomic_long_set(&info->cooldown, 0);
 
 	return 0;
 cleanup_del:
