@@ -95,6 +95,10 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 				add_opt.ext.packets_op = 0;
 				add_opt.ext.packets = 0;
 			}
+			if(info->ssflags & SS_FLAG){
+				add_opt.ext.comment = info->flag;
+			}
+
 			err = ip_set_add(info->add_set.index, skb, par, &add_opt);
 			if(unlikely(err == -IPSET_ERR_HASH_FULL)){
 				atomic_long_set(&info->cooldown, jiffies + HZ);

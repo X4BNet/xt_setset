@@ -33,7 +33,7 @@ setset_match_help(void)
 	       " --ss-add-set name flags [--ss-exist] [--ss-timeout n]\n"
 	       " --ss-del-set name flags\n"
 			" [--ss-nocreate] [--ss-match] [--ss-probability nth] [--ss-packets-gt pkts]\n"
-	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue]\n"
+	       " [--ss-map-mark] [--ss-map-prio] [--ss-map-queue] [--ss-flag flag]\n"
 	       "		add/del src/dst IP/port from/to named sets,\n"
 	       "		where flags are the comma separated list of\n"
 	       "		'src' and 'dst' specifications.\n");
@@ -48,6 +48,7 @@ enum {
 	O_PROBABILITY,
 	O_GT,
 	O_NOCREATE,
+	O_FLAG
 };
 
 static const struct xt_option_entry setset_match_opts[] = {
@@ -59,6 +60,7 @@ static const struct xt_option_entry setset_match_opts[] = {
 	{.name = "ss-map-mark",	.has_arg = false, .id = '6'},
 	{.name = "ss-map-prio",	.has_arg = false, .id = '7'},
 	{.name = "ss-map-queue",	.has_arg = false, .id = '8'}*/
+	{.name = "ss-flag",	.type = XTTYPE_UINT8, .id = O_FLAG},
 	{.name = "ss-packets-gt",	.type = XTTYPE_UINT32, .id = O_GT},
 	{.name = "ss-match",	.type = XTTYPE_NONE, .id = O_MATCH},
 	{.name = "ss-probability",	.type = XTTYPE_STRING, .id = O_PROBABILITY},
@@ -300,6 +302,16 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 			myinfo->ssflags |= SS_INV;
 		}
 		break;
+	case O_FLAG:
+		if (!xtables_strtoui(optarg, NULL, &timeout, 0, UINT8_MAX - 1)){
+			xtables_error(PARAMETER_PROBLEM,
+				      "Invalid value for option --ss-flag "
+				      "or out of range 0-%u", UINT8_MAX - 1);
+					  return 0;
+		}
+		myinfo->flag = (uint8_t)timeout;
+		myinfo->ssflags |= SS_FLAG;
+		break;
 	case O_PROBABILITY:
   		myinfo->probability = lround(0x80000000 * strtod(optarg, NULL));
 		break;
@@ -366,6 +378,10 @@ setset_match_print(const void *ip, const struct xt_entry_match *target,
 		       1.0 * info->probability / 0x80000000);
 	if(info->gt)
 		printf(" ss-packets-gt %u", info->gt);
+
+	if(info->ssflags & SS_FLAG){
+		printf(" ss-flag %u", info->flag);
+	}
 }
 
 static void
@@ -396,6 +412,9 @@ setset_match_save(const void *ip, const struct xt_entry_match *target)
 		       1.0 * info->probability / 0x80000000);
 	if(info->gt)
 		printf(" --ss-packets-gt %u", info->gt);
+	if(info->ssflags & SS_FLAG){
+		printf(" --ss-flag %u", info->flag);
+	}
 }
 
 static struct xtables_match setset_match[] = {

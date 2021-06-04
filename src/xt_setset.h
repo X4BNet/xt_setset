@@ -8,6 +8,7 @@ struct xt_setset_info_target {
     __u32 ssflags;
 	__u32 probability;
 	__u32 gt;
+	__u8 flag;
 #ifdef __KERNEL__
 	atomic_long_t cooldown;
 #else
@@ -18,6 +19,7 @@ struct xt_setset_info_target {
 
 enum {
 	SS_MATCH = 1,
-	SS_INV=2,
-	SS_NOCREATE=4
+	SS_INV = 2,
+	SS_NOCREATE = 4,
+	SS_FLAG = 8
 };
