@@ -1,4 +1,4 @@
-#define DEBUG 1
+//define DEBUG 1
 /* Xtables module to match packets using a BPF filter.
  * Copyright 2013 Google Inc.
  * Written by Willem de Bruijn <willemb@google.com>
