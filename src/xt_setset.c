@@ -74,7 +74,9 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 		}
 		create = ret = match_set(info->add_set.index, skb, par, &add_opt, 0);
 
+		// if no create we will only update (if exists)
 		if((info->ssflags & SS_NOCREATE)) {
+			// do a search, but this time without the pkts gt than restriction (to work out if we need to update)
 			if(!create && info->gt){
 				add_opt.ext.packets_op = 0;
 				add_opt.ext.packets = 0;
@@ -98,6 +100,8 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 			if(info->ssflags & SS_FLAG){
 				add_opt.ext.comment = info->flag;
 			}
+
+			add_opt.cmdflags |= IPSET_FLAG_EXIST;
 
 			err = ip_set_add(info->add_set.index, skb, par, &add_opt);
 			if(unlikely(err == -IPSET_ERR_HASH_FULL)){
