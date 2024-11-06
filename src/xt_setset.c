@@ -52,7 +52,7 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 static inline bool
 setset_probability(__u32 nth){
 	if(nth == 0) return true;
-	return (prandom_u32() & 0x7FFFFFFF) < nth;
+	return (prandom_u32_max(-1) & 0x7FFFFFFF) < nth;
 }
 
 static bool
