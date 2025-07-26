@@ -52,7 +52,7 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 static inline bool
 setset_probability(__u32 nth){
 	if(nth == 0) return true;
-	return (prandom_u32_max(-1) & 0x7FFFFFFF) < nth;
+	return (get_random_u32() & 0x7FFFFFFF) < nth;
 }
 
 static bool
@@ -98,14 +98,14 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 				add_opt.ext.packets = 0;
 			}
 			if(info->ssflags & SS_FLAG){
-				add_opt.ext.comment = info->flag;
+				add_opt.ext.comment = (char *)(uintptr_t)info->flag;
 			}
 
 			add_opt.cmdflags |= IPSET_FLAG_EXIST;
 
 			err = ip_set_add(info->add_set.index, skb, par, &add_opt);
 			if(unlikely(err == -IPSET_ERR_HASH_FULL)){
-				atomic_long_set(&info->cooldown, jiffies + HZ);
+				atomic_long_set((atomic_long_t *)&info->cooldown, jiffies + HZ);
 			}
 		}
 	}
