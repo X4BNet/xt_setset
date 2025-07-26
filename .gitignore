@@ -1,1 +1,15 @@
 .vscode
+
+# Build artifacts
+*.ko
+*.o
+*.mod
+*.mod.c
+*.so
+*_sh.o
+.*.cmd
+modules.order
+Module.symvers
+
+# Generated files
+src/Makefile
