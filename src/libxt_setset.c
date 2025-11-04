@@ -313,7 +313,7 @@ setset_match_parse(int c, char **argv, int invert, unsigned int *flags,
 		myinfo->ssflags |= SS_FLAG;
 		break;
 	case O_PROBABILITY:
-  		myinfo->probability = lround(0x80000000 * strtod(optarg, NULL));
+  		myinfo->probability = (__u32)(0x80000000 * strtod(optarg, NULL));
 		break;
 	case O_NOCREATE:
   		myinfo->ssflags |= SS_NOCREATE;
