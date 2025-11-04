@@ -435,7 +435,7 @@ static struct xtables_match setset_match[] = {
 	},
 };
 
-void _init(void)
+static void __attribute__((constructor)) _init(void)
 {
 	xtables_register_match(setset_match);
 }
