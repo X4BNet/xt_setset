@@ -42,7 +42,7 @@ libxt_setset_sh.o: libxt_setset.c
 	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_setset.c
 
 %.so: %_sh.o
-	gcc -shared -lxtables -o $@ $<
+	gcc -shared -Wl,--no-as-needed -lxtables -lm -o $@ $<
 
 linstall: | libxt_setset.so
 	@echo " *"
