@@ -98,7 +98,7 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 				add_opt.ext.packets = 0;
 			}
 			if(info->ssflags & SS_FLAG){
-				add_opt.ext.comment = info->flag;
+				add_opt.ext.comment = (char *)info->flag;
 			}
 
 			add_opt.cmdflags |= IPSET_FLAG_EXIST;
