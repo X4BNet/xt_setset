@@ -1,0 +1,44 @@
+- hosts: filtering
+  become: yes
+  tasks:
+    - name: test load
+      shell: modprobe xt_setset
+
+    - name: verify xtables match is registered
+      shell: iptables -m setset -h | grep -q setset
+
+    - name: test setset rule parsing
+      shell: |
+        set -e
+
+        cleanup() {
+          iptables -w -F SETSET_CI 2>/dev/null || true
+          iptables -w -X SETSET_CI 2>/dev/null || true
+          ipset destroy setset_ci_add 2>/dev/null || true
+          ipset destroy setset_ci_del 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        cleanup
+
+        ipset create setset_ci_add hash:ip timeout 60 -exist
+        ipset create setset_ci_del hash:ip -exist
+        iptables -w -N SETSET_CI
+        iptables -w -A SETSET_CI \
+          -m setset \
+          --ss-add-set setset_ci_add src \
+          --ss-exist \
+          --ss-timeout 30 \
+          --ss-del-set setset_ci_del src \
+          -j RETURN
+        iptables-save | grep -q -- '--ss-add-set setset_ci_add src'
+        iptables-save | grep -q -- '--ss-del-set setset_ci_del src'
+        iptables -w -D SETSET_CI \
+          -m setset \
+          --ss-add-set setset_ci_add src \
+          --ss-exist \
+          --ss-timeout 30 \
+          --ss-del-set setset_ci_del src \
+          -j RETURN
+      args:
+        executable: /bin/bash

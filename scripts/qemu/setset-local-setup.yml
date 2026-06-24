@@ -1,0 +1,34 @@
+- hosts: filtering
+  become: yes
+  vars:
+    setset_guest_build_dir: /tmp/xt-setset-local-build
+  pre_tasks:
+    - shell: ethtool -L ens3 combined 6
+  tasks:
+    - apt:
+        name:
+          - build-essential
+          - git
+          - ipset
+          - iptables
+          - libxtables-dev
+          - pkg-config
+        state: present
+        update_cache: yes
+    - file:
+        path: "{{ setset_guest_build_dir }}"
+        state: absent
+    - shell: >
+        tar -C /module-src -cf - . |
+        sshpass -p '{{ ansible_ssh_pass }}' ssh
+        -o StrictHostKeyChecking=no
+        {{ ansible_user }}@{{ inventory_hostname }}
+        "sudo mkdir -p {{ setset_guest_build_dir }} &&
+        sudo tar -xf - -C {{ setset_guest_build_dir }}"
+      delegate_to: localhost
+    - shell:
+        cmd: bash ./build.sh --kver={{ ansible_kernel }}
+        chdir: "{{ setset_guest_build_dir }}"
+    - shell:
+        cmd: make install KCFLAGS=-O3
+        chdir: "{{ setset_guest_build_dir }}/src"

@@ -1,0 +1,46 @@
+name: xt_setset QEMU
+
+on:
+  push:
+    paths:
+      - ".github/workflows/qemu.yml"
+      - ".gitmodules"
+      - "ci/kernel-module-ci"
+      - "ci/kernel-module-ci/**"
+      - "scripts/**"
+      - "src/**"
+      - "build.sh"
+  schedule:
+    - cron: "15 11 * * *"
+  workflow_dispatch:
+
+concurrency: xt_setset-qemu
+
+jobs:
+  qemu:
+    runs-on: [self-hosted, linux, x4b, vmip]
+    steps:
+      - name: Checkout xt_setset
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Checkout kernel-module-ci
+        uses: actions/checkout@v6
+        with:
+          repository: X4BNet/kernel-module-ci
+          path: ci/kernel-module-ci
+          ssh-key: ${{ secrets.KERNEL_MODULE_CI_DEPLOY_KEY }}
+          fetch-depth: 0
+
+      - name: Pin kernel-module-ci
+        run: |
+          KMOD_CI_SHA="$(git ls-tree HEAD ci/kernel-module-ci | awk '{print $3}')"
+          test -n "$KMOD_CI_SHA"
+          git -C ci/kernel-module-ci checkout --detach "$KMOD_CI_SHA"
+
+      - name: Allow sudo in runner
+        run: echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+
+      - name: Run QEMU tests
+        run: VMIP=${VMIP:-192.168.224.2} ./scripts/test-qemu.sh --skip-local-build
