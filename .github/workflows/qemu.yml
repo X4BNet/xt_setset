@@ -43,4 +43,4 @@ jobs:
         run: echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
 
       - name: Run QEMU tests
-        run: VMIP=${VMIP:-192.168.224.2} ./scripts/test-qemu.sh --skip-local-build
+        run: ./scripts/test-qemu.sh --skip-local-build

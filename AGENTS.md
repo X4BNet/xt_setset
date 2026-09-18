@@ -30,17 +30,16 @@ Prerequisites:
   checkout
 - Docker on the host
 - `sudo` on the host
-- default or explicit guest IP via `VMIP`
+- optional preferred guest IP via `VMIP`
 
-The shared QEMU harness creates a Docker bridge subnet from `VMIP` using a
-`/21`, so `VMIP` must not overlap Docker address pools or host routes.
-`192.168.224.2` is the known-good default used by CI; avoid `172.17.*` on
-runners with Docker's default bridge.
+The shared harness dynamically leases a non-overlapping `/24` from
+`192.168.224.0/19`. `VMIP` is a preferred address and falls back to a free
+subnet unless `X4B_QEMU_STRICT_VMIP=1` is set.
 
 Run the CI-parity guest build and smoke-test flow from the repo root:
 
 ```sh
-VMIP=192.168.224.2 ./scripts/test-qemu.sh
+./scripts/test-qemu.sh
 ```
 
 Useful variants:

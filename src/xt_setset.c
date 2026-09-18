@@ -52,7 +52,11 @@ match_set(ip_set_id_t index, const struct sk_buff *skb,
 static inline bool
 setset_probability(__u32 nth){
 	if(nth == 0) return true;
-	return (prandom_u32_max(-1) & 0x7FFFFFFF) < nth;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	return (prandom_u32() & 0x7FFFFFFF) < nth;
+#else
+	return (get_random_int() & 0x7FFFFFFF) < nth;
+#endif
 }
 
 static bool

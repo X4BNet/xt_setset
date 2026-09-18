@@ -19,7 +19,13 @@ Environment:
                       Path to shared kernel-module-ci checkout. Default: ci/kernel-module-ci, then ../kernel-module-ci
   X4B_KERNEL_ARTIFACT_DIR
                       Path to a prebuilt kernel artifact directory. Default: use /runner/kernel cache
-  VMIP                Guest VM IPv4 address. Default: 192.168.224.2
+  VMIP                Preferred guest IPv4 address; falls back if occupied.
+  X4B_QEMU_SUBNET_POOL
+                      Allocation pool. Default: 192.168.224.0/19
+  X4B_QEMU_SUBNET_PREFIX
+                      Per-run prefix. Default: 24
+  X4B_QEMU_STRICT_VMIP
+                      Set to 1 to require the preferred VMIP.
 EOF
 }
 
