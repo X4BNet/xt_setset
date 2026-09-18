@@ -1,26 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Determine the module version used by DKMS.
 
-# Script to determine the version of xt_setset package
-# Used by DKMS and other build systems
+set -euo pipefail
 
-# Try to get version from git tags first
-if command -v git >/dev/null 2>&1 && [ -d ../.git ]; then
-    # Get the latest git tag, or fall back to commit hash
-    VERSION=$(git describe --tags --always --dirty 2>/dev/null)
-    if [ -n "$VERSION" ]; then
-        echo "$VERSION"
-        exit 0
-    fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -r "$SCRIPT_DIR/.module-version" ]]; then
+  sed -n '1p' "$SCRIPT_DIR/.module-version"
+elif git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$SCRIPT_DIR" rev-parse HEAD
+else
+  echo "1.0"
 fi
-
-# Try to get version from debian/changelog if it exists
-if [ -f ../debian/changelog ]; then
-    VERSION=$(head -1 ../debian/changelog | sed -n 's/.*(\([^)]*\)).*/\1/p')
-    if [ -n "$VERSION" ]; then
-        echo "$VERSION"
-        exit 0
-    fi
-fi
-
-# Fall back to a default version with timestamp
-echo "1.0.0-$(date +%Y%m%d)"
