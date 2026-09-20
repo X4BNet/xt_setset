@@ -21,7 +21,7 @@
 #include "xt_setset.h"
 
 MODULE_AUTHOR("Mathew Heard <mheard@x4b.net>");
-MODULE_DESCRIPTION("Xtables: Additional ipset matches");
+MODULE_DESCRIPTION("Xtables: Additional ipset matches" " (" X4B_GIT_COMMIT ")");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("ipt_setset");
 MODULE_ALIAS("ip6t_setset");
