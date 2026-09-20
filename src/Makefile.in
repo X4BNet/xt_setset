@@ -12,7 +12,8 @@ CC = gcc
 
 # https://www.kernel.org/doc/Documentation/kbuild/modules.txt
 # https://www.kernel.org/doc/Documentation/kbuild/makefiles.txt
-X4B_GIT_COMMIT := $(shell git -C $(src)/.. rev-parse --verify HEAD 2>/dev/null || echo unknown)
+X4B_SOURCE_COMMIT = @GIT_COMMIT@
+X4B_GIT_COMMIT := $(shell git -c safe.directory=$(abspath $(src)/..) -C $(src)/.. rev-parse --verify HEAD 2>/dev/null || echo $(X4B_SOURCE_COMMIT))
 obj-m = xt_setset.o
 ccflags-y = @KOPTS@ -DX4B_GIT_COMMIT='"$(X4B_GIT_COMMIT)"'
 

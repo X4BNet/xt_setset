@@ -509,11 +509,23 @@ iptables_modules	#IPTLIB
 
 dkms_check
 
+# Retain the checkout commit when DKMS copies the generated Makefile without .git.
+GIT_COMMIT=
+GIT_ROOT=`cd .. && pwd`
+if command -v git >/dev/null 2>&1 && [ -e "$GIT_ROOT/.git" ]; then
+  GIT_COMMIT=`git -c safe.directory="$GIT_ROOT" -C "$GIT_ROOT" rev-parse --verify HEAD 2>/dev/null`
+fi
+if [ -z "$GIT_COMMIT" ] && [ -f Makefile ]; then
+  GIT_COMMIT=`sed -n 's/^X4B_SOURCE_COMMIT = \([0-9a-f]\{40\}\)$/\1/p' Makefile`
+fi
+test "$GIT_COMMIT" || GIT_COMMIT=unknown
+
 REPLACE="\
 s!@CARGS@!$CARGS!;\
 s!@KVERSION@!$KVERSION!;\
 s!@KDIR@!$KDIR!;\
 s!@KOPTS@!$KOPTS!;\
+s!@GIT_COMMIT@!$GIT_COMMIT!;\
 s!@SNMPTARGET@!$SNMPTARGET!;\
 s!@SNMPINSTALL@!$SNMPINSTALL!;\
 s!@DKMSINSTALL@!$DKMSINSTALL!;\
