@@ -29,18 +29,15 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: X4BNet/kernel-module-ci
+          ref: main
           path: ci/kernel-module-ci
           ssh-key: ${{ secrets.KERNEL_MODULE_CI_DEPLOY_KEY }}
-          fetch-depth: 0
-
-      - name: Pin kernel-module-ci
-        run: |
-          KMOD_CI_SHA="$(git ls-tree HEAD ci/kernel-module-ci | awk '{print $3}')"
-          test -n "$KMOD_CI_SHA"
-          git -C ci/kernel-module-ci checkout --detach "$KMOD_CI_SHA"
 
       - name: Allow sudo in runner
         run: echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+
+      - name: Log in to Docker Hub
+        run: echo '${{ secrets.dockerhub_token }}' | docker login -u x4bnet --password-stdin
 
       - name: Run QEMU tests
         run: ./scripts/test-qemu.sh --skip-local-build
