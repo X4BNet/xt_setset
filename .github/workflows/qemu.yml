@@ -33,6 +33,11 @@ jobs:
           path: ci/kernel-module-ci
           ssh-key: ${{ secrets.KERNEL_MODULE_CI_DEPLOY_KEY }}
 
+      - name: Install QEMU host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y coreutils iproute2 python3 sudo
+
       - name: Allow sudo in runner
         run: echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
 
