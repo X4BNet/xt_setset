@@ -546,7 +546,7 @@ banset4_bucket_matches_avx2(const struct banset4_bucket *bucket,
 		"vzeroupper"
 		: [low] "=r" (low), [high] "=r" (high)
 		: [key] "m" (*(const u64 *)key), [bucket] "r" (bucket)
-		: "memory", "ymm0", "ymm1");
+		: "memory");
 	low = (low & 1) | ((low >> 7) & 2) | ((low >> 14) & 4) |
 	      ((low >> 21) & 8);
 	high = (high & 1) | ((high >> 7) & 2) | ((high >> 14) & 4) |
