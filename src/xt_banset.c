@@ -1615,6 +1615,10 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 	union banset_key keys[X4B_BANSET_NATIVE_MAX_BATCH];
 	struct banset_table *tables[X4B_BANSET_NATIVE_MAX_BATCH] = {};
 	struct banset *sets[X4B_BANSET_NATIVE_MAX_BATCH] = {};
+	struct banset *cached_sets[2] = {};
+	struct banset_table *cached_tables[2] = {};
+	bool cached[2] = {};
+	struct net_device *cached_dev = NULL;
 	u8 families[X4B_BANSET_NATIVE_MAX_BATCH] = {};
 	u64 valid = 0, hits = 0;
 	bool use_simd = false;
@@ -1626,7 +1630,7 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 	rcu_read_lock_bh();
 	for (i = 0; i < count; i++) {
 		struct net_device *dev;
-		const char *name;
+		u8 family_index;
 		u8 family;
 
 		if (xdps) {
@@ -1646,11 +1650,25 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 			if (banset_packet_key(family, skbs[i], &keys[i]))
 				continue;
 		}
-		name = family == NFPROTO_IPV4 ? "ban" : "ban6";
-		sets[i] = banset_find_binding_rcu(name, family, dev_net(dev));
+		if (dev != cached_dev) {
+			memset(cached, 0, sizeof(cached));
+			cached_dev = dev;
+		}
+		family_index = family == NFPROTO_IPV4 ? 0 : 1;
+		if (!cached[family_index]) {
+			const char *name = family_index ? "ban6" : "ban";
+
+			cached_sets[family_index] =
+				banset_find_binding_rcu(name, family, dev_net(dev));
+			cached_tables[family_index] = cached_sets[family_index] ?
+				rcu_dereference_bh(cached_sets[family_index]->table) :
+				NULL;
+			cached[family_index] = true;
+		}
+		sets[i] = cached_sets[family_index];
 		if (!sets[i])
 			continue;
-		tables[i] = rcu_dereference_bh(sets[i]->table);
+		tables[i] = cached_tables[family_index];
 		if (!tables[i])
 			continue;
 		families[i] = family;
