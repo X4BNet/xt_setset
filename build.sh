@@ -162,7 +162,7 @@ fi
 
 DEFAULT_KERNEL_RELEASE_PATH="/lib/modules/$KVER/build/include/config/kernel.release"
 HEADER_PACKAGE="linux-headers-$KVER"
-PACKAGES=(build-essential git iptables libxtables-dev pkg-config)
+PACKAGES=(bpftool build-essential clang dwarves git ipset iptables libbpf-dev libipset-dev libxtables-dev pkg-config)
 
 if [[ -z "$KDIR" && ! -f "$DEFAULT_KERNEL_RELEASE_PATH" ]]; then
   PACKAGES+=("$HEADER_PACKAGE")
@@ -206,7 +206,9 @@ for artifact in \
   "$SRC_DIR/xt_setset.ko" \
   "$SRC_DIR/xt_banset.ko" \
   "$SRC_DIR/libxt_setset.so" \
-  "$SRC_DIR/libxt_banset.so"
+  "$SRC_DIR/libxt_banset.so" \
+  "$SRC_DIR/libipset_hash_ipipflag.so" \
+  "$SRC_DIR/x4b_banset_xdp.bpf.o"
 do
   if [[ -e "$artifact" ]]; then
     printf '  %s\n' "${artifact#$SCRIPT_DIR/}"

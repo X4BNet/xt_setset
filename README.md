@@ -81,3 +81,17 @@ The direct match modes are `match`, `refresh`, and `add`. Probability applies
 to refresh/add mutations; a refresh rule still reports the membership result
 on every packet. Ranges, networks, permanent entries, counters, comments,
 skbinfo, and force-add are intentionally unsupported.
+
+## XDP acceleration
+
+The XDP-capable branch builds `src/x4b_banset_xdp.bpf.o`. Its production
+program is in section `xdp/x4b_banset`; it looks up the live `ban`/`ban6`
+tables through `bpf_x4b_banset_match`, refreshes hits with a 1% sample, records
+NetFlow status 32 through `bpf_x4b_netflow_xdp_record`, and drops the packet.
+Lookup errors, malformed packets, unsupported protocols, and misses pass to the
+normal stack, where a direct netfilter rule should remain installed as fallback.
+
+The object also contains `xdp/x4b_banset_lookup` (drop hits without NetFlow)
+and `xdp/x4b_pass` sections for controlled benchmarks. Per-CPU pass, hit, drop,
+lookup-error, and NetFlow-error counters are exposed in the
+`x4b_banset_stats` map.

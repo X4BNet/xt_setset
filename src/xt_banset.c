@@ -2,8 +2,12 @@
 /* X4B exact source/destination ban table and direct xtables match. */
 
 #include <linux/bitmap.h>
+#include <linux/bpf.h>
+#include <linux/btf.h>
+#include <linux/btf_ids.h>
 #include <linux/errno.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/jhash.h>
@@ -25,6 +29,7 @@
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/netlink.h>
+#include <net/xdp.h>
 
 #include "xt_banset.h"
 
@@ -97,6 +102,8 @@ struct banset {
 	u32 maxelem;
 	u32 timeout;
 	u8 family;
+	bool bound;
+	struct net *net;
 	struct ip_set *set;
 	struct list_head bindings;
 };
@@ -668,6 +675,15 @@ static int banset_grow(struct banset *set)
 					lockdep_is_held(&set->resize_mutex));
 	if (!old || old->capacity >= set->maxelem)
 		goto out_unlock;
+	/*
+	 * A synchronous retry and the queued worker can observe the same full
+	 * generation.  Once either has enlarged it, do not let the stale second
+	 * request immediately enlarge a lightly occupied replacement again.
+	 */
+	if (old->capacity > min_t(u32, set->maxelem,
+					 BANSET_INITIAL_CAPACITY) &&
+	    atomic_read(&set->elements) <= old->capacity * 4 / 5)
+		goto out_unlock;
 	target = min(old->capacity << 1, set->maxelem);
 	new = banset_table_create(set->family, target, old->seed);
 	if (!new) {
@@ -697,8 +713,13 @@ static int banset_grow(struct banset *set)
 			banset_key_read(old, bucket, slot, &key);
 			spin_lock(&new->lock);
 			write_seqcount_begin(&new->seq);
+			/*
+			 * Packet/control-plane updates are mirrored into growing while
+			 * the walk is in progress.  Reaching one of those keys later is
+			 * therefore expected, not a migration failure.
+			 */
 			ret = __banset_upsert_locked(new, &key, old->flags[index],
-						     old->expires[index], false,
+						     old->expires[index], true,
 						     &created);
 			write_seqcount_end(&new->seq);
 			spin_unlock(&new->lock);
@@ -709,6 +730,7 @@ static int banset_grow(struct banset *set)
 		cond_resched();
 	}
 
+	spin_lock_bh(&set->update_lock);
 	spin_lock_bh(&old->lock);
 	write_seqcount_begin(&old->seq);
 	if (!ret)
@@ -717,6 +739,7 @@ static int banset_grow(struct banset *set)
 		old->growing = NULL;
 	write_seqcount_end(&old->seq);
 	spin_unlock_bh(&old->lock);
+	spin_unlock_bh(&set->update_lock);
 	synchronize_rcu();
 	if (ret)
 		banset_table_put(new);
@@ -964,7 +987,8 @@ static int banset_uadt(struct ip_set *ipset, struct nlattr *tb[],
 			return -IPSET_ERR_PROTOCOL;
 		port = ntohs(nla_get_be16(tb[IPSET_ATTR_PORT]));
 		if (port > U8_MAX)
-			return -ERANGE;
+			/* A raw errno is treated as a resize retry by ipset(8). */
+			return -IPSET_ERR_PROTOCOL;
 	}
 
 	if (ipset->family == NFPROTO_IPV4) {
@@ -1113,26 +1137,30 @@ static int banset_list(const struct ip_set *ipset, struct sk_buff *skb,
 static void banset_flush(struct ip_set *ipset)
 {
 	struct banset *set = ipset->data;
-	struct banset_table *old, *new;
+	struct banset_table *table, *growing;
 
-	cancel_work_sync(&set->grow_work);
-	mutex_lock(&set->resize_mutex);
 	spin_lock_bh(&set->update_lock);
-	old = rcu_dereference_protected(set->table,
-					lockdep_is_held(&set->resize_mutex));
-	new = banset_table_create(set->family,
-				  old ? min(old->capacity, BANSET_INITIAL_CAPACITY) :
-					BANSET_INITIAL_CAPACITY,
-				  old ? old->seed : get_random_u32());
-	if (new) {
-		rcu_assign_pointer(set->table, new);
-		atomic_set(&set->elements, 0);
-		spin_unlock_bh(&set->update_lock);
-		synchronize_rcu();
-		banset_table_put(old);
-	} else
-		spin_unlock_bh(&set->update_lock);
-	mutex_unlock(&set->resize_mutex);
+	rcu_read_lock_bh();
+	table = rcu_dereference_bh(set->table);
+	if (!table)
+		goto out_rcu;
+	spin_lock_bh(&table->lock);
+	write_seqcount_begin(&table->seq);
+	memset(table->occupied, 0, table->bucket_mask + 1);
+	growing = table->growing;
+	if (growing) {
+		spin_lock(&growing->lock);
+		write_seqcount_begin(&growing->seq);
+		memset(growing->occupied, 0, growing->bucket_mask + 1);
+		write_seqcount_end(&growing->seq);
+		spin_unlock(&growing->lock);
+	}
+	atomic_set(&set->elements, 0);
+	write_seqcount_end(&table->seq);
+	spin_unlock_bh(&table->lock);
+out_rcu:
+	rcu_read_unlock_bh();
+	spin_unlock_bh(&set->update_lock);
 }
 
 static bool banset_same_set(const struct ip_set *a, const struct ip_set *b)
@@ -1140,6 +1168,11 @@ static bool banset_same_set(const struct ip_set *a, const struct ip_set *b)
 	const struct banset *left = a->data;
 	const struct banset *right = b->data;
 
+	/*
+	 * The ipset core implements swap without a type callback.  Name-bound
+	 * direct and XDP lookups therefore deliberately follow the core's swapped
+	 * names.  same_set() is used only by CREATE ... -exist.
+	 */
 	return a->family == b->family && left->maxelem == right->maxelem &&
 	       left->timeout == right->timeout;
 }
@@ -1147,8 +1180,19 @@ static bool banset_same_set(const struct ip_set *a, const struct ip_set *b)
 static void banset_cancel_gc(struct ip_set *ipset)
 {
 	struct banset *set = ipset->data;
+	bool synchronize = false;
 
 	cancel_delayed_work_sync(&set->gc_work);
+	cancel_work_sync(&set->grow_work);
+	mutex_lock(&banset_bindings_lock);
+	if (set->bound) {
+		list_del_rcu(&set->bindings);
+		set->bound = false;
+		synchronize = true;
+	}
+	mutex_unlock(&banset_bindings_lock);
+	if (synchronize)
+		synchronize_rcu();
 }
 
 static void banset_destroy(struct ip_set *ipset)
@@ -1156,14 +1200,8 @@ static void banset_destroy(struct ip_set *ipset)
 	struct banset *set = ipset->data;
 	struct banset_table *table;
 
-	cancel_work_sync(&set->grow_work);
-	cancel_delayed_work_sync(&set->gc_work);
-	mutex_lock(&banset_bindings_lock);
-	list_del(&set->bindings);
-	mutex_unlock(&banset_bindings_lock);
 	table = rcu_dereference_protected(set->table, 1);
 	RCU_INIT_POINTER(set->table, NULL);
-	synchronize_rcu();
 	banset_table_put(table);
 	kfree(set);
 }
@@ -1255,6 +1293,7 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 	set->maxelem = maxelem;
 	set->timeout = ipset->timeout;
 	set->family = ipset->family;
+	set->net = net;
 	set->set = ipset;
 	RCU_INIT_POINTER(set->table, table);
 	ipset->data = set;
@@ -1271,7 +1310,8 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 		return -EOPNOTSUPP;
 	}
 	mutex_lock(&banset_bindings_lock);
-	list_add_tail(&set->bindings, &banset_bindings);
+	list_add_tail_rcu(&set->bindings, &banset_bindings);
+	set->bound = true;
 	mutex_unlock(&banset_bindings_lock);
 	queue_delayed_work(system_power_efficient_wq, &set->gc_work,
 			   (1U << BANSET_EPOCH_SHIFT) * HZ);
@@ -1319,40 +1359,56 @@ static struct ip_set_type banset_type __read_mostly = {
 	.me = THIS_MODULE,
 };
 
-static struct banset *banset_find_binding(const char *name, u8 family)
+static struct banset *banset_find_binding(const char *name, u8 family,
+					  const struct net *net)
 {
 	struct banset *set;
 
 	list_for_each_entry(set, &banset_bindings, bindings)
-		if (set->family == family && !strncmp(set->set->name, name,
+		if (set->family == family && set->net == net &&
+		    !strncmp(set->set->name, name,
 							 IPSET_MAXNAMELEN))
 			return set;
 	return NULL;
 }
 
+static struct banset *banset_find_binding_rcu(const char *name, u8 family,
+					      const struct net *net);
+
 static bool banset_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_banset_mtinfo *info = par->matchinfo;
-	struct banset *set = (void *)(unsigned long)info->backend;
+	struct banset_table *table;
+	struct banset *set;
 	union banset_key key = {};
 	u8 flag;
 	bool hit;
 
-	if (unlikely(!set || banset_packet_key(info->family, skb, &key)))
+	if (unlikely(banset_packet_key(info->family, skb, &key)))
 		return false;
-	hit = !banset_lookup(set, &key, &flag);
+	rcu_read_lock_bh();
+	set = banset_find_binding_rcu(info->setname, info->family, xt_net(par));
+	if (unlikely(!set)) {
+		rcu_read_unlock_bh();
+		return false;
+	}
+	table = rcu_dereference_bh(set->table);
+	hit = table && !banset_lookup_table(table, &key, &flag);
 	switch (info->mode) {
 	case XT_BANSET_REFRESH:
 		if (hit && banset_probability(info->probability))
 			banset_refresh(set, &key, set->timeout);
-		return hit;
+		break;
 	case XT_BANSET_ADD:
 		if (banset_probability(info->probability))
 			banset_upsert(set, &key, info->flag, set->timeout, true);
-		return true;
+		hit = true;
+		break;
 	default:
-		return hit;
+		break;
 	}
+	rcu_read_unlock_bh();
+	return hit;
 }
 
 static int banset_mt_check(const struct xt_mtchk_param *par)
@@ -1368,7 +1424,7 @@ static int banset_mt_check(const struct xt_mtchk_param *par)
 	if (index == IPSET_INVALID_ID)
 		return -ENOENT;
 	mutex_lock(&banset_bindings_lock);
-	set = banset_find_binding(info->setname, par->family);
+	set = banset_find_binding(info->setname, par->family, par->net);
 	if (set)
 		info->backend = (unsigned long)set;
 	mutex_unlock(&banset_bindings_lock);
@@ -1411,6 +1467,117 @@ static struct xt_match banset_matches[] __read_mostly = {
 	},
 };
 
+static struct banset *banset_find_binding_rcu(const char *name, u8 family,
+					      const struct net *net)
+{
+	struct banset *set;
+
+	list_for_each_entry_rcu(set, &banset_bindings, bindings)
+		if (set->family == family && set->net == net &&
+		    !strncmp(set->set->name, name, IPSET_MAXNAMELEN))
+			return set;
+	return NULL;
+}
+
+static int banset_xdp_key(struct xdp_buff *xdp, union banset_key *key,
+			  u8 *family)
+{
+	const unsigned char *data = xdp->data;
+	const unsigned char *data_end = xdp->data_end;
+	const struct ethhdr *eth;
+	__be16 protocol;
+	u32 offset = sizeof(*eth);
+	int vlan;
+
+	if (data + sizeof(*eth) > data_end)
+		return -EINVAL;
+	eth = (const struct ethhdr *)data;
+	protocol = eth->h_proto;
+	for (vlan = 0; vlan < 2 && eth_type_vlan(protocol); vlan++) {
+		const struct vlan_hdr *header;
+
+		if (data + offset + sizeof(*header) > data_end)
+			return -EINVAL;
+		header = (const struct vlan_hdr *)(data + offset);
+		protocol = header->h_vlan_encapsulated_proto;
+		offset += sizeof(*header);
+	}
+	if (eth_type_vlan(protocol))
+		return -EOPNOTSUPP;
+	if (protocol == htons(ETH_P_IP)) {
+		const struct iphdr *iph = (const struct iphdr *)(data + offset);
+
+		if ((const unsigned char *)(iph + 1) > data_end ||
+		    iph->version != 4 || iph->ihl < 5 ||
+		    data + offset + iph->ihl * 4 > data_end)
+			return -EINVAL;
+		key->v4.src = iph->saddr;
+		key->v4.dst = iph->daddr;
+		*family = NFPROTO_IPV4;
+		return 0;
+	}
+	if (protocol == htons(ETH_P_IPV6)) {
+		const struct ipv6hdr *ip6h =
+			(const struct ipv6hdr *)(data + offset);
+
+		if ((const unsigned char *)(ip6h + 1) > data_end ||
+		    ip6h->version != 6)
+			return -EINVAL;
+		key->v6.src = ip6h->saddr;
+		key->v6.dst = ip6h->daddr;
+		*family = NFPROTO_IPV6;
+		return 0;
+	}
+	return -EAFNOSUPPORT;
+}
+
+__bpf_kfunc_start_defs();
+
+__bpf_kfunc int bpf_x4b_banset_match(struct xdp_md *ctx,
+				     u32 refresh_threshold)
+{
+	struct xdp_buff *xdp = (struct xdp_buff *)ctx;
+	union banset_key key = {};
+	struct banset_table *table;
+	struct banset *set;
+	const char *name;
+	u8 family, flag;
+	int ret;
+
+	ret = banset_xdp_key(xdp, &key, &family);
+	if (ret)
+		return ret;
+	if (!xdp->rxq || !xdp->rxq->dev)
+		return -ENODEV;
+	name = family == NFPROTO_IPV4 ? "ban" : "ban6";
+	rcu_read_lock_bh();
+	set = banset_find_binding_rcu(name, family, dev_net(xdp->rxq->dev));
+	if (!set) {
+		ret = -ENODEV;
+		goto out_rcu;
+	}
+	table = rcu_dereference_bh(set->table);
+	ret = table ? banset_lookup_table(table, &key, &flag) : -ENODEV;
+	if (!ret && (refresh_threshold == U32_MAX ||
+		     (refresh_threshold &&
+		      get_random_u32() < refresh_threshold)))
+		banset_refresh(set, &key, set->timeout);
+out_rcu:
+	rcu_read_unlock_bh();
+	return ret ? ret : flag;
+}
+
+__bpf_kfunc_end_defs();
+
+BTF_KFUNCS_START(x4b_banset_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_x4b_banset_match, KF_TRUSTED_ARGS)
+BTF_KFUNCS_END(x4b_banset_kfunc_ids)
+
+static const struct btf_kfunc_id_set x4b_banset_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &x4b_banset_kfunc_ids,
+};
+
 static int __init banset_init(void)
 {
 	int ret;
@@ -1419,8 +1586,16 @@ static int __init banset_init(void)
 	if (ret)
 		return ret;
 	ret = xt_register_matches(banset_matches, ARRAY_SIZE(banset_matches));
-	if (ret)
+	if (ret) {
 		ip_set_type_unregister(&banset_type);
+		return ret;
+	}
+	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_XDP,
+					 &x4b_banset_kfunc_set);
+	if (ret) {
+		xt_unregister_matches(banset_matches, ARRAY_SIZE(banset_matches));
+		ip_set_type_unregister(&banset_type);
+	}
 	return ret;
 }
 
