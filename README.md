@@ -62,6 +62,22 @@ You can disable DKMS during configuration if needed:
 ./configure --disable-dkms-install   # Build with DKMS support but don't auto-install
 ```
 
-## xt_setban
+## xt_banset
 
-a single rule banning module
+`xt_banset` owns the exact-pair `hash:ip,ip,flag` ipset type and supplies a
+packet lookup path that does not enter the ipset core. Sets must have a positive
+timeout and accept only scalar source/destination addresses, an 8-bit flag, and
+IPv4 or IPv6 families.
+
+```bash
+ipset create ban hash:ip,ip,flag family inet timeout 600 maxelem 2097152
+ipset add ban 192.0.2.1,198.51.100.10,7 timeout 600
+iptables -t raw -A PREROUTING \
+  -m banset --ban-set ban --ban-mode refresh --ban-probability 0.01 \
+  -j DROP
+```
+
+The direct match modes are `match`, `refresh`, and `add`. Probability applies
+to refresh/add mutations; a refresh rule still reports the membership result
+on every packet. Ranges, networks, permanent entries, counters, comments,
+skbinfo, and force-add are intentionally unsupported.

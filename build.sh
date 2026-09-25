@@ -204,7 +204,9 @@ echo "Produced artifacts:"
 for artifact in \
   "$SRC_DIR/Makefile" \
   "$SRC_DIR/xt_setset.ko" \
-  "$SRC_DIR/libxt_setset.so"
+  "$SRC_DIR/xt_banset.ko" \
+  "$SRC_DIR/libxt_setset.so" \
+  "$SRC_DIR/libxt_banset.so"
 do
   if [[ -e "$artifact" ]]; then
     printf '  %s\n' "${artifact#$SCRIPT_DIR/}"

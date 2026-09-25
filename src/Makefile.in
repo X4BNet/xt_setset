@@ -14,12 +14,17 @@ CC = gcc
 # https://www.kernel.org/doc/Documentation/kbuild/makefiles.txt
 X4B_SOURCE_COMMIT = @GIT_COMMIT@
 X4B_GIT_COMMIT := $(shell git -c safe.directory=$(abspath $(src)/..) -C $(src)/.. rev-parse --verify HEAD 2>/dev/null || echo $(X4B_SOURCE_COMMIT))
-obj-m = xt_setset.o
+obj-m = xt_setset.o xt_banset.o
 ccflags-y = @KOPTS@ -DX4B_GIT_COMMIT='"$(X4B_GIT_COMMIT)"'
 
-all: xt_setset.ko libxt_setset.so
+all: xt_setset.ko xt_banset.ko libxt_setset.so libxt_banset.so
 
 xt_setset.ko: xt_setset.c Makefile
+	@echo Compiling for kernel $(KVERSION)
+	make -C $(KDIR) M=$(CURDIR) modules CONFIG_DEBUG_INFO=y
+	@touch $@
+
+xt_banset.ko: xt_banset.c xt_banset.h Makefile
 	@echo Compiling for kernel $(KVERSION)
 	make -C $(KDIR) M=$(CURDIR) modules CONFIG_DEBUG_INFO=y
 	@touch $@
@@ -44,11 +49,15 @@ libxt_setset_sh.o: libxt_setset.c
 	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_setset.c
 
 %.so: %_sh.o
-	gcc -shared -o $@ $< -lxtables
+	gcc -shared -nostartfiles -o $@ $< -lxtables
 
-linstall: | libxt_setset.so
+libxt_banset_sh.o: libxt_banset.c xt_banset.h
+	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_banset.c
+
+linstall: | libxt_setset.so libxt_banset.so
 	@echo " *"
 	install -D libxt_setset.so $(DESTDIR)$(IPTABLES_MODULES)/libxt_setset.so
+	install -D libxt_banset.so $(DESTDIR)$(IPTABLES_MODULES)/libxt_banset.so
 
 dinstall:
 	@echo " *"
@@ -58,17 +67,21 @@ install: dinstall linstall
 
 uninstall:
 	-rm -f $(DESTDIR)$(IPTABLES_MODULES)/libxt_setset.so
+	-rm -f $(DESTDIR)$(IPTABLES_MODULES)/libxt_banset.so
 	@if [ "@DKMSINSTALL@" = dinstall ]; then ./install-dkms.sh --uninstall; fi
 	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_setset.ko
+	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_banset.ko
 
 Makefile: Makefile.in configure
 	./configure --make ${CARGS}
 
 load: all
+	-insmod xt_banset.ko
 	-insmod xt_setset.ko
 
 unload:
 	-rmmod xt_setset.ko
+	-rmmod xt_banset.ko
 
 reload: unload load
 
