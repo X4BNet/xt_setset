@@ -95,3 +95,24 @@ The object also contains `xdp/x4b_banset_lookup` (drop hits without NetFlow)
 and `xdp/x4b_pass` sections for controlled benchmarks. Per-CPU pass, hit, drop,
 lookup-error, and NetFlow-error counters are exposed in the
 `x4b_banset_stats` map.
+
+## Native receive-hook experiments
+
+On a kernel carrying the X4B receive-hook patch, `x4b_banset_hook.ko` can run
+the same direct backend either on GRO-normal NAPI lists or in the i40e receive
+loop before skb allocation. The latter supports descriptor look-ahead batches
+of up to 16 packets. IPv4 batch lookups can compare all eight keys in each
+candidate bucket with AVX2 inside one kernel-FPU section per batch; IPv6 and
+unsupported SIMD contexts use the scalar implementation.
+
+```bash
+modprobe x4b_banset_hook stage=napi batch_size=1 simd=0 netflow=1
+modprobe x4b_banset_hook stage=napi batch_size=16 simd=1 netflow=1
+modprobe x4b_banset_hook stage=i40e batch_size=1 simd=0 netflow=1
+modprobe x4b_banset_hook stage=i40e batch_size=16 simd=1 netflow=1
+```
+
+Only one native hook may be registered. Hits are recorded as NetFlow status
+32 with ports suppressed and are then dropped. The normal netfilter banset
+rule should remain installed as a fallback while this experimental interface
+is evaluated. Aggregate counters are available in `/proc/x4b_banset_hook`.

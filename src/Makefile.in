@@ -18,10 +18,10 @@ BPF_SYS_INCLUDES := -I/usr/include/$(shell $(CC) -dumpmachine)
 # https://www.kernel.org/doc/Documentation/kbuild/makefiles.txt
 X4B_SOURCE_COMMIT = @GIT_COMMIT@
 X4B_GIT_COMMIT := $(shell git -c safe.directory=$(abspath $(src)/..) -C $(src)/.. rev-parse --verify HEAD 2>/dev/null || echo $(X4B_SOURCE_COMMIT))
-obj-m = xt_setset.o xt_banset.o
+obj-m = xt_setset.o xt_banset.o x4b_banset_hook.o
 ccflags-y = @KOPTS@ -DX4B_GIT_COMMIT='"$(X4B_GIT_COMMIT)"'
 
-all: xt_setset.ko xt_banset.ko libxt_setset.so libxt_banset.so libipset_hash_ipipflag.so x4b_banset_xdp.bpf.o
+all: xt_setset.ko xt_banset.ko x4b_banset_hook.ko libxt_setset.so libxt_banset.so libipset_hash_ipipflag.so x4b_banset_xdp.bpf.o
 
 define build_kernel_modules
 	@btf_link="$(KDIR)/vmlinux"; created=0; \
@@ -39,6 +39,11 @@ xt_setset.ko: xt_setset.c Makefile
 	@touch $@
 
 xt_banset.ko: xt_banset.c xt_banset.h Makefile
+	@echo Compiling for kernel $(KVERSION)
+	$(build_kernel_modules)
+	@touch $@
+
+x4b_banset_hook.ko: x4b_banset_hook.c x4b_banset_native.h Makefile
 	@echo Compiling for kernel $(KVERSION)
 	$(build_kernel_modules)
 	@touch $@
@@ -94,6 +99,7 @@ uninstall:
 	@if [ "@DKMSINSTALL@" = dinstall ]; then ./install-dkms.sh --uninstall; fi
 	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_setset.ko
 	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_banset.ko
+	-rm -f $(DESTDIR)$(KINSTDIR)/extra/x4b_banset_hook.ko
 
 Makefile: Makefile.in configure
 	./configure --make ${CARGS}
@@ -103,6 +109,7 @@ load: all
 	-insmod xt_setset.ko
 
 unload:
+	-rmmod x4b_banset_hook
 	-rmmod xt_setset.ko
 	-rmmod xt_banset.ko
 

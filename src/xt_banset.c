@@ -31,7 +31,14 @@
 #include <net/netlink.h>
 #include <net/xdp.h>
 
+#if defined(CONFIG_X86_64)
+#include <asm/cpufeature.h>
+#include <asm/fpu/api.h>
+#include <asm/simd.h>
+#endif
+
 #include "xt_banset.h"
+#include "x4b_banset_native.h"
 
 #define BANSET_REV_MIN 0
 #define BANSET_REV_MAX 5
@@ -521,6 +528,76 @@ static int banset_lookup_table(const struct banset_table *table,
 	} while (read_seqcount_retry(&table->seq, sequence));
 	return result;
 }
+
+#if defined(CONFIG_X86_64)
+/* kernel_fpu_begin() must bracket this helper. */
+static __always_inline u8
+banset4_bucket_matches_avx2(const struct banset4_bucket *bucket,
+			    const struct banset4_key *key)
+{
+	u32 low, high;
+
+	asm volatile(
+		"vpbroadcastq %[key], %%ymm0\n\t"
+		"vpcmpeqq 0(%[bucket]), %%ymm0, %%ymm1\n\t"
+		"vpmovmskb %%ymm1, %[low]\n\t"
+		"vpcmpeqq 32(%[bucket]), %%ymm0, %%ymm1\n\t"
+		"vpmovmskb %%ymm1, %[high]\n\t"
+		"vzeroupper"
+		: [low] "=r" (low), [high] "=r" (high)
+		: [key] "m" (*(const u64 *)key), [bucket] "r" (bucket)
+		: "memory", "ymm0", "ymm1");
+	low = (low & 1) | ((low >> 7) & 2) | ((low >> 14) & 4) |
+	      ((low >> 21) & 8);
+	high = (high & 1) | ((high >> 7) & 2) | ((high >> 14) & 4) |
+	       ((high >> 21) & 8);
+	return low | (high << 4);
+}
+
+static int banset_lookup_table_avx2(const struct banset_table *table,
+				    const union banset_key *key, u8 *flag)
+{
+	u32 hash, primary, secondary, sequence;
+	u16 signature, now = banset_epoch();
+	int result, candidate;
+
+	if (table->family != NFPROTO_IPV4)
+		return banset_lookup_table(table, key, flag);
+	hash = banset_hash(table, key);
+	signature = banset_signature(hash);
+	primary = hash & table->bucket_mask;
+	secondary = banset_alt(table, primary, signature);
+	do {
+		u32 candidates[2] = { primary, secondary };
+
+		sequence = read_seqcount_begin(&table->seq);
+		result = -ENOENT;
+		for (candidate = 0; candidate < 2 && result < 0; candidate++) {
+			u32 bucket = candidates[candidate];
+			u8 matches;
+
+			if (candidate && secondary == primary)
+				break;
+			matches = banset4_bucket_matches_avx2(&table->v4[bucket],
+							 &key->v4) &
+				  READ_ONCE(table->occupied[bucket]);
+			while (matches) {
+				u8 slot = __ffs(matches);
+				u32 index = banset_index(bucket, slot);
+				u16 expires = READ_ONCE(table->expires[index]);
+
+				if (!banset_expired(expires, now)) {
+					*flag = READ_ONCE(table->flags[index]);
+					result = 0;
+					break;
+				}
+				matches &= ~BIT(slot);
+			}
+		}
+	} while (read_seqcount_retry(&table->seq, sequence));
+	return result;
+}
+#endif
 
 static int banset_lookup(struct banset *set, const union banset_key *key,
 			 u8 *flag)
@@ -1530,6 +1607,105 @@ static int banset_xdp_key(struct xdp_buff *xdp, union banset_key *key,
 	}
 	return -EAFNOSUPPORT;
 }
+
+static u64 banset_native_batch(struct sk_buff **skbs,
+			       struct xdp_buff **xdps, u32 count,
+			       u32 refresh_threshold, bool simd)
+{
+	union banset_key keys[X4B_BANSET_NATIVE_MAX_BATCH];
+	struct banset_table *tables[X4B_BANSET_NATIVE_MAX_BATCH] = {};
+	struct banset *sets[X4B_BANSET_NATIVE_MAX_BATCH] = {};
+	u8 families[X4B_BANSET_NATIVE_MAX_BATCH] = {};
+	u64 valid = 0, hits = 0;
+	bool use_simd = false;
+	u32 i;
+
+	if (!count || count > X4B_BANSET_NATIVE_MAX_BATCH)
+		return 0;
+	memset(keys, 0, sizeof(keys[0]) * count);
+	rcu_read_lock_bh();
+	for (i = 0; i < count; i++) {
+		struct net_device *dev;
+		const char *name;
+		u8 family;
+
+		if (xdps) {
+			if (banset_xdp_key(xdps[i], &keys[i], &family) ||
+			    !xdps[i]->rxq || !(dev = xdps[i]->rxq->dev))
+				continue;
+		} else {
+			dev = skbs[i]->dev;
+			if (!dev)
+				continue;
+			if (skbs[i]->protocol == htons(ETH_P_IP))
+				family = NFPROTO_IPV4;
+			else if (skbs[i]->protocol == htons(ETH_P_IPV6))
+				family = NFPROTO_IPV6;
+			else
+				continue;
+			if (banset_packet_key(family, skbs[i], &keys[i]))
+				continue;
+		}
+		name = family == NFPROTO_IPV4 ? "ban" : "ban6";
+		sets[i] = banset_find_binding_rcu(name, family, dev_net(dev));
+		if (!sets[i])
+			continue;
+		tables[i] = rcu_dereference_bh(sets[i]->table);
+		if (!tables[i])
+			continue;
+		families[i] = family;
+		valid |= BIT_ULL(i);
+	}
+
+#if defined(CONFIG_X86_64)
+	use_simd = simd && count > 1 && boot_cpu_has(X86_FEATURE_AVX2) &&
+		   may_use_simd();
+	if (use_simd)
+		kernel_fpu_begin();
+#endif
+	for (i = 0; i < count; i++) {
+		u8 flag;
+		int ret;
+
+		if (!(valid & BIT_ULL(i)))
+			continue;
+#if defined(CONFIG_X86_64)
+		ret = use_simd && families[i] == NFPROTO_IPV4 ?
+			banset_lookup_table_avx2(tables[i], &keys[i], &flag) :
+			banset_lookup_table(tables[i], &keys[i], &flag);
+#else
+		ret = banset_lookup_table(tables[i], &keys[i], &flag);
+#endif
+		if (!ret)
+			hits |= BIT_ULL(i);
+	}
+#if defined(CONFIG_X86_64)
+	if (use_simd)
+		kernel_fpu_end();
+#endif
+	if (refresh_threshold)
+		for (i = 0; i < count; i++)
+			if ((hits & BIT_ULL(i)) &&
+			    (refresh_threshold == U32_MAX ||
+			     get_random_u32() < refresh_threshold))
+				banset_refresh(sets[i], &keys[i], sets[i]->timeout);
+	rcu_read_unlock_bh();
+	return hits;
+}
+
+u64 x4b_banset_match_skb_batch(struct sk_buff **packets, u32 count,
+				       u32 refresh_threshold, bool simd)
+{
+	return banset_native_batch(packets, NULL, count, refresh_threshold, simd);
+}
+EXPORT_SYMBOL_GPL(x4b_banset_match_skb_batch);
+
+u64 x4b_banset_match_xdp_batch(struct xdp_buff **packets, u32 count,
+				       u32 refresh_threshold, bool simd)
+{
+	return banset_native_batch(NULL, packets, count, refresh_threshold, simd);
+}
+EXPORT_SYMBOL_GPL(x4b_banset_match_xdp_batch);
 
 __bpf_kfunc_start_defs();
 
