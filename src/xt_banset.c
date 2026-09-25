@@ -44,7 +44,7 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("X4B.Net");
-MODULE_DESCRIPTION("X4B direct exact-pair ban set");
+MODULE_DESCRIPTION("X4B direct exact-pair ban set" " (" X4B_GIT_COMMIT ")");
 MODULE_ALIAS("ip_set_hash:ip,ip,flag");
 MODULE_ALIAS("ipt_banset");
 MODULE_ALIAS("ip6t_banset");
