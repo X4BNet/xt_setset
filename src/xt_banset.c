@@ -8,6 +8,7 @@
 #include <linux/errno.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
+#include <linux/hash.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/jhash.h>
@@ -94,6 +95,7 @@ struct banset_table {
 	struct banset4_bucket *v4;
 	struct banset6_key *v6;
 	u16 *signature;
+	u32 *state;
 	u16 *expires;
 	u8 *flags;
 	u8 *occupied;
@@ -130,6 +132,13 @@ struct banset6_elem {
 
 static LIST_HEAD(banset_bindings);
 static DEFINE_MUTEX(banset_bindings_lock);
+static bool full_alt = true;
+module_param(full_alt, bool, 0444);
+MODULE_PARM_DESC(full_alt, "spread alternate buckets across the full table");
+static uint prefetch_distance = 8;
+module_param(prefetch_distance, uint, 0444);
+MODULE_PARM_DESC(prefetch_distance, "IPv4 batch lookup prefetch distance");
+static atomic64_t native_seq_retries = ATOMIC64_INIT(0);
 
 static inline u16 banset_epoch(void)
 {
@@ -149,20 +158,58 @@ static inline bool banset_expired(u16 expires, u16 now)
 	return (s16)(expires - now) <= 0;
 }
 
+static inline u32 banset_state_pack(u16 expires, u8 flag)
+{
+	return expires | ((u32)flag << 16);
+}
+
+static inline u16 banset_expires_read(const struct banset_table *table,
+				      u32 index)
+{
+	if (table->family == NFPROTO_IPV4)
+		return (u16)READ_ONCE(table->state[index]);
+	return READ_ONCE(table->expires[index]);
+}
+
+static inline u8 banset_flag_read(const struct banset_table *table, u32 index)
+{
+	if (table->family == NFPROTO_IPV4)
+		return READ_ONCE(table->state[index]) >> 16;
+	return READ_ONCE(table->flags[index]);
+}
+
+static inline void banset_state_write(struct banset_table *table, u32 index,
+				      u16 expires, u8 flag)
+{
+	if (table->family == NFPROTO_IPV4)
+		WRITE_ONCE(table->state[index], banset_state_pack(expires, flag));
+	else {
+		WRITE_ONCE(table->expires[index], expires);
+		WRITE_ONCE(table->flags[index], flag);
+	}
+}
+
+static inline void banset_expiry_write(struct banset_table *table, u32 index,
+				       u16 expires)
+{
+	banset_state_write(table, index, expires, banset_flag_read(table, index));
+}
+
 static size_t banset_table_memsize(const struct banset_table *table)
 {
 	u32 buckets = table->bucket_mask + 1;
 	size_t size = sizeof(*table) +
-		(size_t)table->capacity * (sizeof(*table->expires) +
-					  sizeof(*table->flags)) +
+		(size_t)table->capacity * sizeof(*table->signature) +
 		(size_t)buckets * sizeof(*table->occupied) +
 		BANSET_BFS_MAX * sizeof(*table->bfs);
 
-	if (table->family == NFPROTO_IPV4)
-		size += (size_t)buckets * sizeof(*table->v4);
-	else
+	if (table->family == NFPROTO_IPV4) {
+		size += (size_t)buckets * sizeof(*table->v4) +
+			(size_t)table->capacity * sizeof(*table->state);
+	} else
 		size += (size_t)table->capacity *
-			(sizeof(*table->v6) + sizeof(*table->signature));
+			(sizeof(*table->v6) + sizeof(*table->expires) +
+			 sizeof(*table->flags));
 	return size;
 }
 
@@ -173,6 +220,7 @@ static void banset_table_free(struct banset_table *table)
 	kvfree(table->v4);
 	kvfree(table->v6);
 	kvfree(table->signature);
+	kvfree(table->state);
 	kvfree(table->expires);
 	kvfree(table->flags);
 	kvfree(table->occupied);
@@ -198,20 +246,23 @@ banset_table_create(u8 family, u32 capacity, u32 seed)
 	table = kzalloc(sizeof(*table), GFP_KERNEL);
 	if (!table)
 		return NULL;
-	if (family == NFPROTO_IPV4)
+	if (family == NFPROTO_IPV4) {
 		table->v4 = kvcalloc(buckets, sizeof(*table->v4), GFP_KERNEL);
-	else {
+		table->state = kvcalloc(capacity, sizeof(*table->state), GFP_KERNEL);
+	} else {
 		table->v6 = kvcalloc(capacity, sizeof(*table->v6), GFP_KERNEL);
-		table->signature = kvcalloc(capacity, sizeof(*table->signature),
-					    GFP_KERNEL);
+		table->expires = kvcalloc(capacity, sizeof(*table->expires),
+					  GFP_KERNEL);
+		table->flags = kvcalloc(capacity, sizeof(*table->flags), GFP_KERNEL);
 	}
-	table->expires = kvcalloc(capacity, sizeof(*table->expires), GFP_KERNEL);
-	table->flags = kvcalloc(capacity, sizeof(*table->flags), GFP_KERNEL);
+	table->signature = kvcalloc(capacity, sizeof(*table->signature),
+				    GFP_KERNEL);
 	table->occupied = kvcalloc(buckets, sizeof(*table->occupied), GFP_KERNEL);
 	table->bfs = kcalloc(BANSET_BFS_MAX, sizeof(*table->bfs), GFP_KERNEL);
-	if ((family == NFPROTO_IPV4 && !table->v4) ||
-	    (family == NFPROTO_IPV6 && (!table->v6 || !table->signature)) ||
-	    !table->expires || !table->flags || !table->occupied || !table->bfs) {
+	if ((family == NFPROTO_IPV4 && (!table->v4 || !table->state)) ||
+	    (family == NFPROTO_IPV6 &&
+	     (!table->v6 || !table->expires || !table->flags)) ||
+	    !table->signature || !table->occupied || !table->bfs) {
 		banset_table_free(table);
 		return NULL;
 	}
@@ -241,7 +292,11 @@ static inline u16 banset_signature(u32 hash)
 static inline u32 banset_alt(const struct banset_table *table, u32 bucket,
 			     u16 signature)
 {
-	return (bucket ^ signature) & table->bucket_mask;
+	u32 delta = signature;
+
+	if (full_alt)
+		delta = hash_32(signature, ilog2(table->bucket_mask + 1)) | 1;
+	return (bucket ^ delta) & table->bucket_mask;
 }
 
 static inline u32 banset_index(u32 bucket, u8 slot)
@@ -254,11 +309,11 @@ static bool banset_key_equal(const struct banset_table *table, u32 bucket,
 {
 	u32 index = banset_index(bucket, slot);
 
+	if (READ_ONCE(table->signature[index]) != signature)
+		return false;
 	if (table->family == NFPROTO_IPV4)
 		return READ_ONCE(*(const u64 *)&table->v4[bucket].key[slot]) ==
 		       get_unaligned((const u64 *)&key->v4);
-	if (READ_ONCE(table->signature[index]) != signature)
-		return false;
 	return ipv6_addr_equal(&table->v6[index].src, &key->v6.src) &&
 	       ipv6_addr_equal(&table->v6[index].dst, &key->v6.dst);
 }
@@ -283,23 +338,22 @@ static void banset_key_write(struct banset_table *table, u32 bucket, u8 slot,
 		table->v4[bucket].key[slot] = key->v4;
 	else {
 		table->v6[index] = key->v6;
-		table->signature[index] = signature;
 	}
+	table->signature[index] = signature;
 }
 
 static void banset_slot_clear(struct banset_table *table, u32 bucket, u8 slot)
 {
 	u32 index = banset_index(bucket, slot);
 
+	table->signature[index] = 0;
 	if (table->family == NFPROTO_IPV4)
 		memset(&table->v4[bucket].key[slot], 0,
 		       sizeof(table->v4[bucket].key[slot]));
 	else {
 		memset(&table->v6[index], 0, sizeof(table->v6[index]));
-		table->signature[index] = 0;
 	}
-	table->expires[index] = 0;
-	table->flags[index] = 0;
+	banset_state_write(table, index, 0, 0);
 	table->occupied[bucket] &= ~BIT(slot);
 }
 
@@ -398,10 +452,9 @@ static int banset_make_space(struct banset_table *table, u32 primary,
 						banset_hash(table, &moved));
 					banset_key_write(table, dst_bucket, dst_slot,
 							 &moved, moved_signature);
-					table->expires[destination_index] =
-						table->expires[source_index];
-					table->flags[destination_index] =
-						table->flags[source_index];
+					banset_state_write(table, destination_index,
+						banset_expires_read(table, source_index),
+						banset_flag_read(table, source_index));
 					table->occupied[dst_bucket] |= BIT(dst_slot);
 					banset_slot_clear(table, source_bucket, source_slot);
 					dst_bucket = source_bucket;
@@ -441,11 +494,11 @@ static int __banset_upsert_locked(struct banset_table *table,
 	found = banset_find_locked(table, key, hash, &bucket, &slot);
 	if (found) {
 		index = found - 1;
-		if (!banset_expired(table->expires[index], banset_epoch()) &&
+		if (!banset_expired(banset_expires_read(table, index),
+				    banset_epoch()) &&
 		    !update_existing)
 			return -EEXIST;
-		table->flags[index] = flag;
-		table->expires[index] = expires;
+		banset_state_write(table, index, expires, flag);
 		return 0;
 	}
 
@@ -463,8 +516,7 @@ static int __banset_upsert_locked(struct banset_table *table,
 	}
 	index = banset_index(bucket, slot);
 	banset_key_write(table, bucket, slot, key, signature);
-	table->flags[index] = flag;
-	table->expires[index] = expires;
+	banset_state_write(table, index, expires, flag);
 	table->occupied[bucket] |= BIT(slot);
 	*created = true;
 	return 0;
@@ -486,46 +538,56 @@ static int __banset_delete_locked(struct banset_table *table,
 	return 0;
 }
 
-static int banset_lookup_table(const struct banset_table *table,
-			       const union banset_key *key, u8 *flag)
+static int banset_lookup_prehashed(const struct banset_table *table,
+				   const union banset_key *key, u32 hash,
+				   u16 now, u8 *flag)
 {
-	u32 hash, primary, secondary, sequence;
-	u16 signature, now = banset_epoch();
+	u32 primary, secondary;
+	u16 signature;
 	int result, candidate, slot;
 
-	hash = banset_hash(table, key);
 	signature = banset_signature(hash);
 	primary = hash & table->bucket_mask;
 	secondary = banset_alt(table, primary, signature);
-	do {
-		u32 candidates[2] = { primary, secondary };
+	result = -ENOENT;
+	for (candidate = 0; candidate < 2 && result < 0; candidate++) {
+		u32 bucket = candidate ? secondary : primary;
+		u8 occupied;
 
-		sequence = read_seqcount_begin(&table->seq);
-		result = -ENOENT;
-		for (candidate = 0; candidate < 2 && result < 0; candidate++) {
-			u32 bucket = candidates[candidate];
-			u8 occupied;
+		if (candidate && secondary == primary)
+			break;
+		occupied = READ_ONCE(table->occupied[bucket]);
+		for (slot = 0; slot < BANSET_SLOTS; slot++) {
+			u32 index;
+			u16 expires;
 
-			if (candidate && secondary == primary)
-				break;
-			occupied = READ_ONCE(table->occupied[bucket]);
-			for (slot = 0; slot < BANSET_SLOTS; slot++) {
-				u32 index;
-				u16 expires;
-
-				if (!(occupied & BIT(slot)) ||
-				    !banset_key_equal(table, bucket, slot, key,
-						      signature))
-					continue;
-				index = banset_index(bucket, slot);
-				expires = READ_ONCE(table->expires[index]);
-				if (!banset_expired(expires, now)) {
-					*flag = READ_ONCE(table->flags[index]);
-					result = 0;
-				}
-				break;
+			if (!(occupied & BIT(slot)) ||
+			    !banset_key_equal(table, bucket, slot, key,
+					      signature))
+				continue;
+			index = banset_index(bucket, slot);
+			expires = banset_expires_read(table, index);
+			if (!banset_expired(expires, now)) {
+				*flag = banset_flag_read(table, index);
+				result = 0;
 			}
+			break;
 		}
+	}
+	return result;
+}
+
+static int banset_lookup_table(const struct banset_table *table,
+			       const union banset_key *key, u8 *flag)
+{
+	u32 hash = banset_hash(table, key);
+	u32 sequence;
+	u16 now = banset_epoch();
+	int result;
+
+	do {
+		sequence = read_seqcount_begin(&table->seq);
+		result = banset_lookup_prehashed(table, key, hash, now, flag);
 	} while (read_seqcount_retry(&table->seq, sequence));
 	return result;
 }
@@ -533,68 +595,134 @@ static int banset_lookup_table(const struct banset_table *table,
 #if defined(CONFIG_X86_64)
 /* kernel_fpu_begin() must bracket this helper. */
 static __always_inline u8
-banset4_bucket_matches_avx2(const struct banset4_bucket *bucket,
-			    const struct banset4_key *key)
+banset4_bucket_matches_xmm(const struct banset4_bucket *bucket,
+			   const struct banset4_key *key)
+{
+	u32 m0, m1, m2, m3;
+
+	asm volatile(
+		"vpbroadcastq %[key], %%xmm0\n\t"
+		"vpcmpeqq 0(%[bucket]), %%xmm0, %%xmm1\n\t"
+		"vmovmskpd %%xmm1, %[m0]\n\t"
+		"vpcmpeqq 16(%[bucket]), %%xmm0, %%xmm1\n\t"
+		"vmovmskpd %%xmm1, %[m1]\n\t"
+		"vpcmpeqq 32(%[bucket]), %%xmm0, %%xmm1\n\t"
+		"vmovmskpd %%xmm1, %[m2]\n\t"
+		"vpcmpeqq 48(%[bucket]), %%xmm0, %%xmm1\n\t"
+		"vmovmskpd %%xmm1, %[m3]"
+		: [m0] "=&r" (m0), [m1] "=&r" (m1),
+		  [m2] "=&r" (m2), [m3] "=&r" (m3)
+		: [key] "m" (*(const u64 *)key), [bucket] "r" (bucket)
+		: "memory");
+	return m0 | (m1 << 2) | (m2 << 4) | (m3 << 6);
+}
+
+static __always_inline u8
+banset4_bucket_matches_ymm(const struct banset4_bucket *bucket,
+			   const struct banset4_key *key)
 {
 	u32 low, high;
 
 	asm volatile(
 		"vpbroadcastq %[key], %%ymm0\n\t"
 		"vpcmpeqq 0(%[bucket]), %%ymm0, %%ymm1\n\t"
-		"vpmovmskb %%ymm1, %[low]\n\t"
+		"vmovmskpd %%ymm1, %[low]\n\t"
 		"vpcmpeqq 32(%[bucket]), %%ymm0, %%ymm1\n\t"
-		"vpmovmskb %%ymm1, %[high]\n\t"
-		"vzeroupper"
+		"vmovmskpd %%ymm1, %[high]"
 		: [low] "=&r" (low), [high] "=&r" (high)
 		: [key] "m" (*(const u64 *)key), [bucket] "r" (bucket)
 		: "memory");
-	low = (low & 1) | ((low >> 7) & 2) | ((low >> 14) & 4) |
-	      ((low >> 21) & 8);
-	high = (high & 1) | ((high >> 7) & 2) | ((high >> 14) & 4) |
-	       ((high >> 21) & 8);
 	return low | (high << 4);
 }
 
-static int banset_lookup_table_avx2(const struct banset_table *table,
-				    const union banset_key *key, u8 *flag)
+static __always_inline u8
+banset4_signature_matches_xmm(const u16 *signatures, u16 signature)
 {
-	u32 hash, primary, secondary, sequence;
-	u16 signature, now = banset_epoch();
+	u32 mask;
+	u8 matches = 0;
+	int slot;
+
+	asm volatile(
+		"vpbroadcastw %[signature], %%xmm0\n\t"
+		"vpcmpeqw (%[signatures]), %%xmm0, %%xmm1\n\t"
+		"vpmovmskb %%xmm1, %[mask]"
+		: [mask] "=&r" (mask)
+		: [signature] "m" (signature), [signatures] "r" (signatures)
+		: "memory");
+	for (slot = 0; slot < BANSET_SLOTS; slot++)
+		if (mask & BIT(slot * 2))
+			matches |= BIT(slot);
+	return matches;
+}
+
+static int banset_lookup_vector_prehashed(const struct banset_table *table,
+					  const union banset_key *key,
+					  u32 hash, u16 now, u8 *flag,
+					  u8 lookup_mode)
+{
+	u32 primary, secondary;
+	u16 signature;
 	int result, candidate;
 
 	if (table->family != NFPROTO_IPV4)
-		return banset_lookup_table(table, key, flag);
-	hash = banset_hash(table, key);
+		return banset_lookup_prehashed(table, key, hash, now, flag);
 	signature = banset_signature(hash);
 	primary = hash & table->bucket_mask;
 	secondary = banset_alt(table, primary, signature);
-	do {
-		u32 candidates[2] = { primary, secondary };
+	result = -ENOENT;
+	for (candidate = 0; candidate < 2 && result < 0; candidate++) {
+		u32 bucket = candidate ? secondary : primary;
+		u8 matches;
 
-		sequence = read_seqcount_begin(&table->seq);
-		result = -ENOENT;
-		for (candidate = 0; candidate < 2 && result < 0; candidate++) {
-			u32 bucket = candidates[candidate];
-			u8 matches;
+		if (candidate && secondary == primary)
+			break;
+		if (lookup_mode == 1)
+			matches = banset4_bucket_matches_xmm(&table->v4[bucket],
+							     &key->v4);
+		else if (lookup_mode == 2)
+			matches = banset4_bucket_matches_ymm(&table->v4[bucket],
+							     &key->v4);
+		else
+			matches = banset4_signature_matches_xmm(
+				&table->signature[banset_index(bucket, 0)],
+				signature);
+		matches &= READ_ONCE(table->occupied[bucket]);
+		while (matches) {
+			u8 slot = __ffs(matches);
+			u32 index = banset_index(bucket, slot);
+			u16 expires = banset_expires_read(table, index);
 
-			if (candidate && secondary == primary)
-				break;
-			matches = banset4_bucket_matches_avx2(&table->v4[bucket],
-							 &key->v4) &
-				  READ_ONCE(table->occupied[bucket]);
-			while (matches) {
-				u8 slot = __ffs(matches);
-				u32 index = banset_index(bucket, slot);
-				u16 expires = READ_ONCE(table->expires[index]);
-
-				if (!banset_expired(expires, now)) {
-					*flag = READ_ONCE(table->flags[index]);
-					result = 0;
-					break;
-				}
+			if (lookup_mode == 3 &&
+			    !banset_key_equal(table, bucket, slot, key,
+					      signature)) {
 				matches &= ~BIT(slot);
+				continue;
 			}
+
+			if (!banset_expired(expires, now)) {
+				*flag = banset_flag_read(table, index);
+				result = 0;
+				break;
+			}
+			matches &= ~BIT(slot);
 		}
+	}
+	return result;
+}
+
+static int banset_lookup_table_vector(const struct banset_table *table,
+				      const union banset_key *key, u8 *flag,
+				      u8 lookup_mode)
+{
+	u32 hash = banset_hash(table, key);
+	u32 sequence;
+	u16 now = banset_epoch();
+	int result;
+
+	do {
+		sequence = read_seqcount_begin(&table->seq);
+		result = banset_lookup_vector_prehashed(table, key, hash, now,
+						  flag, lookup_mode);
 	} while (read_seqcount_retry(&table->seq, sequence));
 	return result;
 }
@@ -716,8 +844,9 @@ static int banset_refresh(struct banset *set, const union banset_key *key,
 	spin_lock_bh(&table->lock);
 	write_seqcount_begin(&table->seq);
 	found = banset_find_locked(table, key, hash, &bucket, &slot);
-	if (found && !banset_expired(table->expires[found - 1], banset_epoch())) {
-		table->expires[found - 1] = banset_expiry(timeout);
+	if (found && !banset_expired(banset_expires_read(table, found - 1),
+				      banset_epoch())) {
+		banset_expiry_write(table, found - 1, banset_expiry(timeout));
 		ret = 0;
 	}
 	growing = table->growing;
@@ -730,7 +859,8 @@ static int banset_refresh(struct banset *set, const union banset_key *key,
 		found = banset_find_locked(growing, key, grow_hash,
 					   &grow_bucket, &grow_slot);
 		if (found)
-			growing->expires[found - 1] = banset_expiry(timeout);
+			banset_expiry_write(growing, found - 1,
+					    banset_expiry(timeout));
 		write_seqcount_end(&growing->seq);
 		spin_unlock(&growing->lock);
 	}
@@ -796,8 +926,9 @@ static int banset_grow(struct banset *set)
 			 * the walk is in progress.  Reaching one of those keys later is
 			 * therefore expected, not a migration failure.
 			 */
-			ret = __banset_upsert_locked(new, &key, old->flags[index],
-						     old->expires[index], true,
+			ret = __banset_upsert_locked(new, &key,
+						     banset_flag_read(old, index),
+						     banset_expires_read(old, index), true,
 						     &created);
 			write_seqcount_end(&new->seq);
 			spin_unlock(&new->lock);
@@ -873,7 +1004,7 @@ static void banset_gc_work(struct work_struct *work)
 			if (!(occupied & BIT(slot)))
 				continue;
 			index = banset_index(bucket, slot);
-			if (!banset_expired(table->expires[index], now))
+			if (!banset_expired(banset_expires_read(table, index), now))
 				continue;
 			banset_key_read(table, bucket, slot, &key);
 			banset_slot_clear(table, bucket, slot);
@@ -1176,7 +1307,7 @@ static int banset_list(const struct ip_set *ipset, struct sk_buff *skb,
 				spin_unlock_bh(&table->lock);
 				continue;
 			}
-			expires = table->expires[index];
+			expires = banset_expires_read(table, index);
 			if (banset_expired(expires, now)) {
 				spin_unlock_bh(&table->lock);
 				continue;
@@ -1192,7 +1323,7 @@ static int banset_list(const struct ip_set *ipset, struct sk_buff *skb,
 			     (nla_put_ipaddr6(skb, IPSET_ATTR_IP, &key.v6.src) ||
 			      nla_put_ipaddr6(skb, IPSET_ATTR_IP2, &key.v6.dst))) ||
 			    nla_put_net16(skb, IPSET_ATTR_PORT,
-					  htons(table->flags[index])) ||
+					  htons(banset_flag_read(table, index))) ||
 			    nla_put_net32(skb, IPSET_ATTR_TIMEOUT,
 					  htonl((u16)(expires - now) <<
 						BANSET_EPOCH_SHIFT))) {
@@ -1225,11 +1356,20 @@ static void banset_flush(struct ip_set *ipset)
 	spin_lock_bh(&table->lock);
 	write_seqcount_begin(&table->seq);
 	memset(table->occupied, 0, table->bucket_mask + 1);
+	memset(table->signature, 0,
+	       table->capacity * sizeof(*table->signature));
+	if (table->state)
+		memset(table->state, 0, table->capacity * sizeof(*table->state));
 	growing = table->growing;
 	if (growing) {
 		spin_lock(&growing->lock);
 		write_seqcount_begin(&growing->seq);
 		memset(growing->occupied, 0, growing->bucket_mask + 1);
+		memset(growing->signature, 0,
+		       growing->capacity * sizeof(*growing->signature));
+		if (growing->state)
+			memset(growing->state, 0,
+			       growing->capacity * sizeof(*growing->state));
 		write_seqcount_end(&growing->seq);
 		spin_unlock(&growing->lock);
 	}
@@ -1557,11 +1697,11 @@ static struct banset *banset_find_binding_rcu(const char *name, u8 family,
 	return NULL;
 }
 
-static int banset_xdp_key(struct xdp_buff *xdp, union banset_key *key,
-			  u8 *family)
+static int banset_frame_key(const void *frame_data, const void *frame_data_end,
+			    union banset_key *key, u8 *family)
 {
-	const unsigned char *data = xdp->data;
-	const unsigned char *data_end = xdp->data_end;
+	const unsigned char *data = frame_data;
+	const unsigned char *data_end = frame_data_end;
 	const struct ethhdr *eth;
 	__be16 protocol;
 	u32 offset = sizeof(*eth);
@@ -1609,33 +1749,57 @@ static int banset_xdp_key(struct xdp_buff *xdp, union banset_key *key,
 	return -EAFNOSUPPORT;
 }
 
-static u64 banset_native_batch(struct sk_buff **skbs,
-			       struct xdp_buff **xdps, u32 count,
-			       u32 refresh_threshold, bool simd)
+static int banset_xdp_key(struct xdp_buff *xdp, union banset_key *key,
+			  u8 *family)
 {
+	return banset_frame_key(xdp->data, xdp->data_end, key, family);
+}
+
+struct banset_native_scratch {
 	union banset_key keys[X4B_BANSET_NATIVE_MAX_BATCH];
-	struct banset_table *tables[X4B_BANSET_NATIVE_MAX_BATCH] = {};
-	struct banset *sets[X4B_BANSET_NATIVE_MAX_BATCH] = {};
+	struct banset_table *tables[X4B_BANSET_NATIVE_MAX_BATCH];
+	struct banset *sets[X4B_BANSET_NATIVE_MAX_BATCH];
+	u32 random[X4B_BANSET_NATIVE_MAX_BATCH];
+	u32 hash[X4B_BANSET_NATIVE_MAX_BATCH];
+	u8 families[X4B_BANSET_NATIVE_MAX_BATCH];
+};
+
+static DEFINE_PER_CPU(struct banset_native_scratch, banset_native_scratch);
+
+static u64 banset_native_batch(struct sk_buff **skbs,
+			       struct xdp_buff **xdps,
+			       const struct x4b_rx_frame *frames, u32 count,
+			       u32 refresh_threshold, u8 lookup_mode)
+{
+	struct banset_native_scratch *scratch;
 	struct banset *cached_sets[2] = {};
 	struct banset_table *cached_tables[2] = {};
+	struct banset_table *common_table = NULL;
 	bool cached[2] = {};
 	struct net_device *cached_dev = NULL;
-	u8 families[X4B_BANSET_NATIVE_MAX_BATCH] = {};
 	u64 valid = 0, hits = 0;
+	bool homogeneous_v4 = true;
 	bool use_simd = false;
 	u32 i;
 
 	if (!count || count > X4B_BANSET_NATIVE_MAX_BATCH)
 		return 0;
-	memset(keys, 0, sizeof(keys[0]) * count);
 	rcu_read_lock_bh();
+	scratch = this_cpu_ptr(&banset_native_scratch);
+	memset(scratch, 0, sizeof(*scratch));
 	for (i = 0; i < count; i++) {
 		struct net_device *dev;
 		u8 family_index;
 		u8 family;
 
-		if (xdps) {
-			if (banset_xdp_key(xdps[i], &keys[i], &family) ||
+		if (frames) {
+			dev = frames[i].dev;
+			if (!dev || banset_frame_key(frames[i].data,
+						   frames[i].data_end,
+						   &scratch->keys[i], &family))
+				continue;
+		} else if (xdps) {
+			if (banset_xdp_key(xdps[i], &scratch->keys[i], &family) ||
 			    !xdps[i]->rxq || !(dev = xdps[i]->rxq->dev))
 				continue;
 		} else {
@@ -1648,7 +1812,7 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 				family = NFPROTO_IPV6;
 			else
 				continue;
-			if (banset_packet_key(family, skbs[i], &keys[i]))
+			if (banset_packet_key(family, skbs[i], &scratch->keys[i]))
 				continue;
 		}
 		if (dev != cached_dev) {
@@ -1666,65 +1830,178 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 				NULL;
 			cached[family_index] = true;
 		}
-		sets[i] = cached_sets[family_index];
-		if (!sets[i])
+		scratch->sets[i] = cached_sets[family_index];
+		if (!scratch->sets[i])
 			continue;
-		tables[i] = cached_tables[family_index];
-		if (!tables[i])
+		scratch->tables[i] = cached_tables[family_index];
+		if (!scratch->tables[i])
 			continue;
-		families[i] = family;
+		scratch->families[i] = family;
+		if (family != NFPROTO_IPV4)
+			homogeneous_v4 = false;
+		if (!common_table)
+			common_table = scratch->tables[i];
+		else if (common_table != scratch->tables[i])
+			homogeneous_v4 = false;
 		valid |= BIT_ULL(i);
 	}
 
 #if defined(CONFIG_X86_64)
-	use_simd = simd && count > 1 && boot_cpu_has(X86_FEATURE_AVX2) &&
+	use_simd = lookup_mode && count > 1 && boot_cpu_has(X86_FEATURE_AVX2) &&
 		   may_use_simd();
 	if (use_simd)
 		kernel_fpu_begin();
 #endif
-	for (i = 0; i < count; i++) {
-		u8 flag;
-		int ret;
+	if (common_table && homogeneous_v4) {
+		u32 distance = min_t(u32, prefetch_distance, count);
+		u32 sequence;
+		u16 now = banset_epoch();
+		bool retry;
 
-		if (!(valid & BIT_ULL(i)))
-			continue;
+		for (i = 0; i < count; i++)
+			if (valid & BIT_ULL(i))
+				scratch->hash[i] = banset_hash(common_table,
+							       &scratch->keys[i]);
+		do {
+			u32 pf;
+
+			sequence = read_seqcount_begin(&common_table->seq);
+			hits = 0;
+			for (pf = 0; pf < distance; pf++) {
+				u32 hash, primary, secondary;
+				u16 signature;
+
+				if (!(valid & BIT_ULL(pf)))
+					continue;
+				hash = scratch->hash[pf];
+				signature = banset_signature(hash);
+				primary = hash & common_table->bucket_mask;
+				secondary = banset_alt(common_table, primary,
+						       signature);
+				if (lookup_mode == 1 || lookup_mode == 2) {
+					prefetch(&common_table->v4[primary]);
+					prefetch(&common_table->v4[secondary]);
+				} else {
+					prefetch(&common_table->signature[
+						 banset_index(primary, 0)]);
+					prefetch(&common_table->signature[
+						 banset_index(secondary, 0)]);
+				}
+			}
+			for (i = 0; i < count; i++) {
+				u8 flag;
+				int ret;
+
+				pf = i + distance;
+				if (pf < count && (valid & BIT_ULL(pf))) {
+					u32 hash = scratch->hash[pf];
+					u16 signature = banset_signature(hash);
+					u32 primary = hash & common_table->bucket_mask;
+					u32 secondary = banset_alt(common_table,
+								   primary,
+								   signature);
+
+					if (lookup_mode == 1 || lookup_mode == 2) {
+						prefetch(&common_table->v4[primary]);
+						prefetch(&common_table->v4[secondary]);
+					} else {
+						prefetch(&common_table->signature[
+							 banset_index(primary, 0)]);
+						prefetch(&common_table->signature[
+							 banset_index(secondary, 0)]);
+					}
+				}
+				if (!(valid & BIT_ULL(i)))
+					continue;
 #if defined(CONFIG_X86_64)
-		ret = use_simd && families[i] == NFPROTO_IPV4 ?
-			banset_lookup_table_avx2(tables[i], &keys[i], &flag) :
-			banset_lookup_table(tables[i], &keys[i], &flag);
+				ret = use_simd ? banset_lookup_vector_prehashed(
+					common_table, &scratch->keys[i],
+					scratch->hash[i], now, &flag, lookup_mode) :
+					banset_lookup_prehashed(common_table,
+						&scratch->keys[i], scratch->hash[i],
+						now, &flag);
 #else
-		ret = banset_lookup_table(tables[i], &keys[i], &flag);
+				ret = banset_lookup_prehashed(common_table,
+					&scratch->keys[i], scratch->hash[i], now,
+					&flag);
 #endif
-		if (!ret)
-			hits |= BIT_ULL(i);
+				if (!ret)
+					hits |= BIT_ULL(i);
+			}
+			retry = read_seqcount_retry(&common_table->seq, sequence);
+			if (retry)
+				atomic64_inc(&native_seq_retries);
+		} while (retry);
+	} else {
+		for (i = 0; i < count; i++) {
+			u8 flag;
+			int ret;
+
+			if (!(valid & BIT_ULL(i)))
+				continue;
+#if defined(CONFIG_X86_64)
+			ret = use_simd && scratch->families[i] == NFPROTO_IPV4 ?
+				banset_lookup_table_vector(scratch->tables[i],
+					&scratch->keys[i], &flag, lookup_mode) :
+				banset_lookup_table(scratch->tables[i],
+					&scratch->keys[i], &flag);
+#else
+			ret = banset_lookup_table(scratch->tables[i],
+						  &scratch->keys[i], &flag);
+#endif
+			if (!ret)
+				hits |= BIT_ULL(i);
+		}
 	}
 #if defined(CONFIG_X86_64)
-	if (use_simd)
+	if (use_simd) {
+		asm volatile("vzeroupper" ::: "memory");
 		kernel_fpu_end();
+	}
 #endif
+	if (refresh_threshold && refresh_threshold != U32_MAX)
+		get_random_bytes(scratch->random, count * sizeof(scratch->random[0]));
 	if (refresh_threshold)
 		for (i = 0; i < count; i++)
 			if ((hits & BIT_ULL(i)) &&
 			    (refresh_threshold == U32_MAX ||
-			     get_random_u32() < refresh_threshold))
-				banset_refresh(sets[i], &keys[i], sets[i]->timeout);
+			     scratch->random[i] < refresh_threshold))
+				banset_refresh(scratch->sets[i], &scratch->keys[i],
+					       scratch->sets[i]->timeout);
 	rcu_read_unlock_bh();
 	return hits;
 }
 
 u64 x4b_banset_match_skb_batch(struct sk_buff **packets, u32 count,
-				       u32 refresh_threshold, bool simd)
+				       u32 refresh_threshold, u8 lookup_mode)
 {
-	return banset_native_batch(packets, NULL, count, refresh_threshold, simd);
+	return banset_native_batch(packets, NULL, NULL, count, refresh_threshold,
+				   lookup_mode);
 }
 EXPORT_SYMBOL_GPL(x4b_banset_match_skb_batch);
 
 u64 x4b_banset_match_xdp_batch(struct xdp_buff **packets, u32 count,
-				       u32 refresh_threshold, bool simd)
+				       u32 refresh_threshold, u8 lookup_mode)
 {
-	return banset_native_batch(NULL, packets, count, refresh_threshold, simd);
+	return banset_native_batch(NULL, packets, NULL, count, refresh_threshold,
+				   lookup_mode);
 }
 EXPORT_SYMBOL_GPL(x4b_banset_match_xdp_batch);
+
+u64 x4b_banset_match_frame_batch(const struct x4b_rx_frame *packets,
+					 u32 count, u32 refresh_threshold,
+					 u8 lookup_mode)
+{
+	return banset_native_batch(NULL, NULL, packets, count, refresh_threshold,
+				   lookup_mode);
+}
+EXPORT_SYMBOL_GPL(x4b_banset_match_frame_batch);
+
+u64 x4b_banset_native_seq_retries(void)
+{
+	return atomic64_read(&native_seq_retries);
+}
+EXPORT_SYMBOL_GPL(x4b_banset_native_seq_retries);
 
 __bpf_kfunc_start_defs();
 

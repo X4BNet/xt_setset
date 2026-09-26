@@ -19,18 +19,21 @@ extern int x4b_netflow_record_skb_native(struct sk_buff *skb, u8 fw_status,
 					 bool noports);
 extern int x4b_netflow_record_xdp_native(struct xdp_buff *xdp, u8 fw_status,
 					 bool noports);
+extern int x4b_netflow_record_frame_batch_native(
+	const struct x4b_rx_frame *frames, u64 hit_mask, u32 count,
+	u8 fw_status, bool noports);
 
 static char *stage = "off";
 module_param(stage, charp, 0444);
-MODULE_PARM_DESC(stage, "receive stage: off, napi, or i40e");
+MODULE_PARM_DESC(stage, "receive stage: off, napi, i40e, early, or fused");
 
 static uint batch_size = 1;
 module_param(batch_size, uint, 0444);
-MODULE_PARM_DESC(batch_size, "lookup batch size (1-16)");
+MODULE_PARM_DESC(batch_size, "lookup batch size (1-64)");
 
-static bool simd;
-module_param(simd, bool, 0444);
-MODULE_PARM_DESC(simd, "use AVX2 bucket comparisons where safe");
+static uint lookup_mode;
+module_param(lookup_mode, uint, 0444);
+MODULE_PARM_DESC(lookup_mode, "lookup: 0 scalar, 1 XMM keys, 2 YMM keys, 3 XMM signatures");
 
 static bool netflow = true;
 module_param(netflow, bool, 0444);
@@ -45,12 +48,20 @@ struct x4b_hook_stats {
 	u64 batches;
 	u64 hits;
 	u64 netflow_errors;
+	u64 raw_hits;
+	u64 raw_misses;
+	u64 direct_hits;
+	u64 upstream_hits;
+	u64 exceptional_fallbacks;
+	u64 batch_width[X4B_BANSET_NATIVE_MAX_BATCH + 1];
 };
 
 static DEFINE_PER_CPU(struct x4b_hook_stats, hook_stats);
 static struct proc_dir_entry *stats_proc;
 static int (*netflow_skb_fn)(struct sk_buff *, u8, bool);
 static int (*netflow_xdp_fn)(struct xdp_buff *, u8, bool);
+static int (*netflow_frame_batch_fn)(const struct x4b_rx_frame *, u64, u32,
+				    u8, bool);
 
 static u64 x4b_hook_skb_batch(struct sk_buff **packets, u32 count)
 {
@@ -61,11 +72,12 @@ static u64 x4b_hook_skb_batch(struct sk_buff **packets, u32 count)
 		u32 i, n = min_t(u32, batch_size, count - base);
 		u64 hits = x4b_banset_match_skb_batch(packets + base, n,
 						       READ_ONCE(refresh_threshold),
-						       simd && n > 1);
+						       lookup_mode);
 		struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
 
 		stats->packets += n;
 		stats->batches++;
+		stats->batch_width[n]++;
 		stats->hits += hweight64(hits);
 		for (i = 0; netflow_skb_fn && i < n; i++)
 			if ((hits & BIT_ULL(i)) &&
@@ -86,14 +98,52 @@ static u64 x4b_hook_xdp_batch(struct xdp_buff **packets, u32 count)
 		u32 n = min_t(u32, batch_size, count - base);
 		u64 hits = x4b_banset_match_xdp_batch(packets + base, n,
 						       READ_ONCE(refresh_threshold),
-						       simd && n > 1);
+						       lookup_mode);
 		struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
 
 		stats->packets += n;
 		stats->batches++;
+		stats->batch_width[n]++;
 		drops |= hits << base;
 	}
 	return drops;
+}
+
+static u64 x4b_hook_frame_batch(const struct x4b_rx_frame *packets, u32 count)
+{
+	struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
+	u64 hits;
+	u32 hit_count;
+
+	hits = x4b_banset_match_frame_batch(packets, count,
+					       READ_ONCE(refresh_threshold),
+					       lookup_mode);
+	hit_count = hweight64(hits);
+	stats->packets += count;
+	stats->batches++;
+	stats->batch_width[count]++;
+	stats->hits += hit_count;
+	stats->raw_hits += hit_count;
+	stats->raw_misses += count - hit_count;
+	if (!strcmp(stage, "fused"))
+		stats->direct_hits += hit_count;
+	else
+		stats->upstream_hits += hit_count;
+	if (netflow_frame_batch_fn && hits) {
+		int errors = netflow_frame_batch_fn(packets, hits, count,
+						    X4B_STATUS_BANNED, true);
+
+		if (errors > 0)
+			stats->netflow_errors += errors;
+		else if (errors < 0)
+			stats->netflow_errors++;
+	}
+	return hits;
+}
+
+static void x4b_hook_frame_fallback(u32 count)
+{
+	this_cpu_add(hook_stats.exceptional_fallbacks, count);
 }
 
 static void x4b_hook_xdp_drop(struct xdp_buff *packet)
@@ -111,7 +161,7 @@ static struct x4b_rx_hook_ops hook_ops;
 static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 {
 	struct x4b_hook_stats total = {};
-	int cpu;
+	int cpu, width;
 
 	for_each_possible_cpu(cpu) {
 		const struct x4b_hook_stats *stats = per_cpu_ptr(&hook_stats, cpu);
@@ -120,12 +170,30 @@ static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 		total.batches += READ_ONCE(stats->batches);
 		total.hits += READ_ONCE(stats->hits);
 		total.netflow_errors += READ_ONCE(stats->netflow_errors);
+		total.raw_hits += READ_ONCE(stats->raw_hits);
+		total.raw_misses += READ_ONCE(stats->raw_misses);
+		total.direct_hits += READ_ONCE(stats->direct_hits);
+		total.upstream_hits += READ_ONCE(stats->upstream_hits);
+		total.exceptional_fallbacks +=
+			READ_ONCE(stats->exceptional_fallbacks);
+		for (width = 1; width <= X4B_BANSET_NATIVE_MAX_BATCH; width++)
+			total.batch_width[width] +=
+				READ_ONCE(stats->batch_width[width]);
 	}
-	seq_printf(seq, "stage %s\nbatch_size %u\nsimd %u\nnetflow %u\n",
-		   stage, batch_size, simd, netflow);
+	seq_printf(seq, "stage %s\nbatch_size %u\nlookup_mode %u\nnetflow %u\n",
+		   stage, batch_size, lookup_mode, netflow);
 	seq_printf(seq, "packets %llu\nbatches %llu\nhits %llu\nnetflow_errors %llu\n",
 		   total.packets, total.batches, total.hits,
 		   total.netflow_errors);
+	seq_printf(seq, "raw_hits %llu\nraw_misses %llu\ndirect_hits %llu\n",
+		   total.raw_hits, total.raw_misses, total.direct_hits);
+	seq_printf(seq, "upstream_hits %llu\nexceptional_fallbacks %llu\n",
+		   total.upstream_hits, total.exceptional_fallbacks);
+	seq_printf(seq, "seq_retries %llu\n", x4b_banset_native_seq_retries());
+	for (width = 1; width <= X4B_BANSET_NATIVE_MAX_BATCH; width++)
+		if (total.batch_width[width])
+			seq_printf(seq, "batch_width_%d %llu\n", width,
+				   total.batch_width[width]);
 	return 0;
 }
 
@@ -147,10 +215,14 @@ static int __init x4b_banset_hook_init(void)
 
 	batch_size = clamp_t(uint, batch_size, 1,
 			     X4B_BANSET_NATIVE_MAX_BATCH);
+	lookup_mode = min_t(uint, lookup_mode, 3);
 	if (netflow) {
 		netflow_skb_fn = symbol_get(x4b_netflow_record_skb_native);
 		netflow_xdp_fn = symbol_get(x4b_netflow_record_xdp_native);
-		if (!netflow_skb_fn || !netflow_xdp_fn) {
+		netflow_frame_batch_fn =
+			symbol_get(x4b_netflow_record_frame_batch_native);
+		if (!netflow_skb_fn || !netflow_xdp_fn ||
+		    !netflow_frame_batch_fn) {
 			ret = -ENODEV;
 			goto put_symbols;
 		}
@@ -159,13 +231,17 @@ static int __init x4b_banset_hook_init(void)
 		hook_ops.skb_batch = x4b_hook_skb_batch;
 	else if (!strcmp(stage, "i40e"))
 		hook_ops.xdp_batch = x4b_hook_xdp_batch;
+	else if (!strcmp(stage, "early") || !strcmp(stage, "fused"))
+		hook_ops.frame_batch = x4b_hook_frame_batch;
 	else if (strcmp(stage, "off")) {
 		ret = -EINVAL;
 		goto put_symbols;
 	}
 	hook_ops.xdp_batch_size = batch_size;
+	hook_ops.frame_fallback = x4b_hook_frame_fallback;
+	hook_ops.frame_direct_consume = !strcmp(stage, "fused");
 	hook_ops.xdp_drop = x4b_hook_xdp_drop;
-	if (hook_ops.skb_batch || hook_ops.xdp_batch) {
+	if (hook_ops.skb_batch || hook_ops.xdp_batch || hook_ops.frame_batch) {
 		ret = x4b_rx_hook_register(&hook_ops);
 		if (ret)
 			goto put_symbols;
@@ -176,14 +252,16 @@ static int __init x4b_banset_hook_init(void)
 		ret = -ENOMEM;
 		goto unregister;
 	}
-	pr_info("stage=%s batch=%u simd=%u netflow=%u\n",
-		stage, batch_size, simd, netflow);
+	pr_info("stage=%s batch=%u lookup_mode=%u netflow=%u\n",
+		stage, batch_size, lookup_mode, netflow);
 	return 0;
 
 unregister:
-	if (hook_ops.skb_batch || hook_ops.xdp_batch)
+	if (hook_ops.skb_batch || hook_ops.xdp_batch || hook_ops.frame_batch)
 		x4b_rx_hook_unregister(&hook_ops);
 put_symbols:
+	if (netflow_frame_batch_fn)
+		symbol_put(x4b_netflow_record_frame_batch_native);
 	if (netflow_xdp_fn)
 		symbol_put(x4b_netflow_record_xdp_native);
 	if (netflow_skb_fn)
@@ -194,8 +272,10 @@ put_symbols:
 static void __exit x4b_banset_hook_exit(void)
 {
 	proc_remove(stats_proc);
-	if (hook_ops.skb_batch || hook_ops.xdp_batch)
+	if (hook_ops.skb_batch || hook_ops.xdp_batch || hook_ops.frame_batch)
 		x4b_rx_hook_unregister(&hook_ops);
+	if (netflow_frame_batch_fn)
+		symbol_put(x4b_netflow_record_frame_batch_native);
 	if (netflow_xdp_fn)
 		symbol_put(x4b_netflow_record_xdp_native);
 	if (netflow_skb_fn)
