@@ -136,7 +136,7 @@ static bool full_alt = true;
 module_param(full_alt, bool, 0444);
 MODULE_PARM_DESC(full_alt, "spread alternate buckets across the full table");
 static uint prefetch_distance = 8;
-module_param(prefetch_distance, uint, 0444);
+module_param(prefetch_distance, uint, 0644);
 MODULE_PARM_DESC(prefetch_distance, "IPv4 batch lookup prefetch distance");
 static atomic64_t native_seq_retries = ATOMIC64_INIT(0);
 
