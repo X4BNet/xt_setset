@@ -842,7 +842,13 @@ static int banset_refresh(struct banset *set, const union banset_key *key,
 		goto out_rcu;
 	hash = banset_hash(table, key);
 	spin_lock_bh(&table->lock);
-	write_seqcount_begin(&table->seq);
+	/*
+	 * Refresh changes only the naturally aligned packed state word.  Keys,
+	 * signatures, and occupancy remain fixed, so publishing a seqcount write
+	 * would make concurrent readers retry needlessly.  The table lock still
+	 * serializes refresh with add/delete/resize and protects the lookup used
+	 * to find the state word.
+	 */
 	found = banset_find_locked(table, key, hash, &bucket, &slot);
 	if (found && !banset_expired(banset_expires_read(table, found - 1),
 				      banset_epoch())) {
@@ -855,16 +861,13 @@ static int banset_refresh(struct banset *set, const union banset_key *key,
 		u8 grow_slot;
 
 		spin_lock(&growing->lock);
-		write_seqcount_begin(&growing->seq);
 		found = banset_find_locked(growing, key, grow_hash,
 					   &grow_bucket, &grow_slot);
 		if (found)
 			banset_expiry_write(growing, found - 1,
 					    banset_expiry(timeout));
-		write_seqcount_end(&growing->seq);
 		spin_unlock(&growing->lock);
 	}
-	write_seqcount_end(&table->seq);
 	spin_unlock_bh(&table->lock);
 out_rcu:
 	rcu_read_unlock_bh();
@@ -1786,7 +1789,6 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 		return 0;
 	rcu_read_lock_bh();
 	scratch = this_cpu_ptr(&banset_native_scratch);
-	memset(scratch, 0, sizeof(*scratch));
 	for (i = 0; i < count; i++) {
 		struct net_device *dev;
 		u8 family_index;
@@ -1959,7 +1961,7 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 		kernel_fpu_end();
 	}
 #endif
-	if (refresh_threshold && refresh_threshold != U32_MAX)
+	if (hits && refresh_threshold && refresh_threshold != U32_MAX)
 		get_random_bytes(scratch->random, count * sizeof(scratch->random[0]));
 	if (refresh_threshold)
 		for (i = 0; i < count; i++)
