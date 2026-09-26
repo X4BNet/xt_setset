@@ -9,6 +9,9 @@
 #include <linux/skbuff.h>
 #include <linux/x4b_rx_hook.h>
 #include <net/xdp.h>
+#if defined(CONFIG_X86_64)
+#include <asm/msr.h>
+#endif
 
 #include "x4b_banset_native.h"
 
@@ -20,8 +23,8 @@ extern int x4b_netflow_record_skb_native(struct sk_buff *skb, u8 fw_status,
 extern int x4b_netflow_record_xdp_native(struct xdp_buff *xdp, u8 fw_status,
 					 bool noports);
 extern int x4b_netflow_record_frame_batch_native(
-	const struct x4b_rx_frame *frames, u64 hit_mask, u32 count,
-	u8 fw_status, bool noports);
+	const struct x4b_rx_frame_batch *batch, u64 hit_mask, u8 fw_status,
+	bool noports);
 
 static char *stage = "off";
 module_param(stage, charp, 0444);
@@ -53,14 +56,25 @@ struct x4b_hook_stats {
 	u64 direct_hits;
 	u64 upstream_hits;
 	u64 exceptional_fallbacks;
+	u64 tsc_driver_samples;
+	u64 tsc_driver_scan;
+	u64 tsc_driver_consume;
+	u64 tsc_netflow_samples;
+	u64 tsc_netflow;
+	u64 timing_calls;
 	u64 batch_width[X4B_BANSET_NATIVE_MAX_BATCH + 1];
 };
 
+struct x4b_hook_scratch {
+	struct x4b_rx_parse parsed[X4B_BANSET_NATIVE_MAX_BATCH];
+};
+
 static struct x4b_hook_stats __percpu *hook_stats;
+static DEFINE_PER_CPU(struct x4b_hook_scratch, hook_scratch);
 static struct proc_dir_entry *stats_proc;
 static int (*netflow_skb_fn)(struct sk_buff *, u8, bool);
 static int (*netflow_xdp_fn)(struct xdp_buff *, u8, bool);
-static int (*netflow_frame_batch_fn)(const struct x4b_rx_frame *, u64, u32,
+static int (*netflow_frame_batch_fn)(const struct x4b_rx_frame_batch *, u64,
 				    u8, bool);
 
 static u64 x4b_hook_skb_batch(struct sk_buff **packets, u32 count)
@@ -109,29 +123,48 @@ static u64 x4b_hook_xdp_batch(struct xdp_buff **packets, u32 count)
 	return drops;
 }
 
-static u64 x4b_hook_frame_batch(const struct x4b_rx_frame *packets, u32 count)
+static u64 x4b_hook_frame_batch(const struct x4b_rx_frame_batch *batch)
 {
 	struct x4b_hook_stats *stats = this_cpu_ptr(hook_stats);
+	struct x4b_hook_scratch *scratch = this_cpu_ptr(&hook_scratch);
+	struct x4b_rx_frame_batch netflow_batch = *batch;
+	u64 netflow_started = 0;
+	bool sample;
 	u64 hits;
 	u32 hit_count;
 
-	hits = x4b_banset_match_frame_batch(packets, count,
+	stats->timing_calls++;
+	sample = !(stats->timing_calls & 1023);
+	hits = x4b_banset_match_frame_batch(batch, scratch->parsed,
 					       READ_ONCE(refresh_threshold),
 					       lookup_mode);
 	hit_count = hweight64(hits);
-	stats->packets += count;
+	stats->packets += batch->count;
 	stats->batches++;
-	stats->batch_width[count]++;
+	stats->batch_width[batch->count]++;
 	stats->hits += hit_count;
 	stats->raw_hits += hit_count;
-	stats->raw_misses += count - hit_count;
+	stats->raw_misses += batch->count - hit_count;
+	if (batch->timing_sample) {
+		stats->tsc_driver_samples++;
+		stats->tsc_driver_scan += batch->scan_cycles;
+	}
 	if (!strcmp(stage, "fused"))
 		stats->direct_hits += hit_count;
 	else
 		stats->upstream_hits += hit_count;
 	if (netflow_frame_batch_fn && hits) {
-		int errors = netflow_frame_batch_fn(packets, hits, count,
-						    X4B_STATUS_BANNED, true);
+		int errors;
+
+		if (sample)
+			netflow_started = rdtsc_ordered();
+		netflow_batch.parsed = scratch->parsed;
+		errors = netflow_frame_batch_fn(&netflow_batch, hits, X4B_STATUS_BANNED,
+						true);
+		if (sample) {
+			stats->tsc_netflow_samples++;
+			stats->tsc_netflow += rdtsc_ordered() - netflow_started;
+		}
 
 		if (errors > 0)
 			stats->netflow_errors += errors;
@@ -139,6 +172,11 @@ static u64 x4b_hook_frame_batch(const struct x4b_rx_frame *packets, u32 count)
 			stats->netflow_errors++;
 	}
 	return hits;
+}
+
+static void x4b_hook_frame_consume_cycles(u64 cycles)
+{
+	this_cpu_ptr(hook_stats)->tsc_driver_consume += cycles;
 }
 
 static void x4b_hook_frame_fallback(u32 count)
@@ -161,6 +199,7 @@ static struct x4b_rx_hook_ops hook_ops;
 static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 {
 	struct x4b_hook_stats total = {};
+	struct x4b_banset_native_timing timing;
 	int cpu, width;
 
 	for_each_possible_cpu(cpu) {
@@ -176,6 +215,11 @@ static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 		total.upstream_hits += READ_ONCE(stats->upstream_hits);
 		total.exceptional_fallbacks +=
 			READ_ONCE(stats->exceptional_fallbacks);
+		total.tsc_driver_samples += READ_ONCE(stats->tsc_driver_samples);
+		total.tsc_driver_scan += READ_ONCE(stats->tsc_driver_scan);
+		total.tsc_driver_consume += READ_ONCE(stats->tsc_driver_consume);
+		total.tsc_netflow_samples += READ_ONCE(stats->tsc_netflow_samples);
+		total.tsc_netflow += READ_ONCE(stats->tsc_netflow);
 		for (width = 1; width <= X4B_BANSET_NATIVE_MAX_BATCH; width++)
 			total.batch_width[width] +=
 				READ_ONCE(stats->batch_width[width]);
@@ -190,6 +234,18 @@ static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 	seq_printf(seq, "upstream_hits %llu\nexceptional_fallbacks %llu\n",
 		   total.upstream_hits, total.exceptional_fallbacks);
 	seq_printf(seq, "seq_retries %llu\n", x4b_banset_native_seq_retries());
+	seq_printf(seq, "tsc_driver_samples %llu\ntsc_driver_scan %llu\n",
+		   total.tsc_driver_samples, total.tsc_driver_scan);
+	seq_printf(seq, "tsc_driver_consume %llu\ntsc_netflow_samples %llu\n",
+		   total.tsc_driver_consume, total.tsc_netflow_samples);
+	seq_printf(seq, "tsc_netflow %llu\n", total.tsc_netflow);
+	x4b_banset_native_timing_read(&timing);
+	seq_printf(seq, "tsc_calls %llu\ntsc_samples %llu\n",
+		   timing.calls, timing.samples);
+	seq_printf(seq, "tsc_parse %llu\ntsc_hash %llu\ntsc_primary %llu\n",
+		   timing.parse, timing.hash, timing.primary);
+	seq_printf(seq, "tsc_secondary %llu\ntsc_refresh %llu\ntsc_total %llu\n",
+		   timing.secondary, timing.refresh, timing.total);
 	for (width = 1; width <= X4B_BANSET_NATIVE_MAX_BATCH; width++)
 		if (total.batch_width[width])
 			seq_printf(seq, "batch_width_%d %llu\n", width,
@@ -234,7 +290,8 @@ static int __init x4b_banset_hook_init(void)
 		hook_ops.skb_batch = x4b_hook_skb_batch;
 	else if (!strcmp(stage, "i40e"))
 		hook_ops.xdp_batch = x4b_hook_xdp_batch;
-	else if (!strcmp(stage, "early") || !strcmp(stage, "fused"))
+	else if (!strcmp(stage, "early") || !strcmp(stage, "early-prefetch") ||
+		 !strcmp(stage, "fused"))
 		hook_ops.frame_batch = x4b_hook_frame_batch;
 	else if (strcmp(stage, "off")) {
 		ret = -EINVAL;
@@ -242,7 +299,11 @@ static int __init x4b_banset_hook_init(void)
 	}
 	hook_ops.xdp_batch_size = batch_size;
 	hook_ops.frame_fallback = x4b_hook_frame_fallback;
-	hook_ops.frame_direct_consume = !strcmp(stage, "fused");
+	hook_ops.frame_consume_cycles = x4b_hook_frame_consume_cycles;
+	if (!strcmp(stage, "early-prefetch") || !strcmp(stage, "fused"))
+		hook_ops.frame_flags |= X4B_RX_FRAME_F_PREFETCH_HEADER;
+	if (!strcmp(stage, "fused"))
+		hook_ops.frame_flags |= X4B_RX_FRAME_F_DIRECT_CONSUME;
 	hook_ops.xdp_drop = x4b_hook_xdp_drop;
 	if (hook_ops.skb_batch || hook_ops.xdp_batch || hook_ops.frame_batch) {
 		ret = x4b_rx_hook_register(&hook_ops);
