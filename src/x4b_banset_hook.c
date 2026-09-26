@@ -56,7 +56,7 @@ struct x4b_hook_stats {
 	u64 batch_width[X4B_BANSET_NATIVE_MAX_BATCH + 1];
 };
 
-static DEFINE_PER_CPU(struct x4b_hook_stats, hook_stats);
+static struct x4b_hook_stats __percpu *hook_stats;
 static struct proc_dir_entry *stats_proc;
 static int (*netflow_skb_fn)(struct sk_buff *, u8, bool);
 static int (*netflow_xdp_fn)(struct xdp_buff *, u8, bool);
@@ -73,7 +73,7 @@ static u64 x4b_hook_skb_batch(struct sk_buff **packets, u32 count)
 		u64 hits = x4b_banset_match_skb_batch(packets + base, n,
 						       READ_ONCE(refresh_threshold),
 						       lookup_mode);
-		struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
+		struct x4b_hook_stats *stats = this_cpu_ptr(hook_stats);
 
 		stats->packets += n;
 		stats->batches++;
@@ -99,7 +99,7 @@ static u64 x4b_hook_xdp_batch(struct xdp_buff **packets, u32 count)
 		u64 hits = x4b_banset_match_xdp_batch(packets + base, n,
 						       READ_ONCE(refresh_threshold),
 						       lookup_mode);
-		struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
+		struct x4b_hook_stats *stats = this_cpu_ptr(hook_stats);
 
 		stats->packets += n;
 		stats->batches++;
@@ -111,7 +111,7 @@ static u64 x4b_hook_xdp_batch(struct xdp_buff **packets, u32 count)
 
 static u64 x4b_hook_frame_batch(const struct x4b_rx_frame *packets, u32 count)
 {
-	struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
+	struct x4b_hook_stats *stats = this_cpu_ptr(hook_stats);
 	u64 hits;
 	u32 hit_count;
 
@@ -143,12 +143,12 @@ static u64 x4b_hook_frame_batch(const struct x4b_rx_frame *packets, u32 count)
 
 static void x4b_hook_frame_fallback(u32 count)
 {
-	this_cpu_add(hook_stats.exceptional_fallbacks, count);
+	this_cpu_ptr(hook_stats)->exceptional_fallbacks += count;
 }
 
 static void x4b_hook_xdp_drop(struct xdp_buff *packet)
 {
-	struct x4b_hook_stats *stats = this_cpu_ptr(&hook_stats);
+	struct x4b_hook_stats *stats = this_cpu_ptr(hook_stats);
 
 	stats->hits++;
 	if (netflow_xdp_fn &&
@@ -164,7 +164,7 @@ static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 	int cpu, width;
 
 	for_each_possible_cpu(cpu) {
-		const struct x4b_hook_stats *stats = per_cpu_ptr(&hook_stats, cpu);
+		const struct x4b_hook_stats *stats = per_cpu_ptr(hook_stats, cpu);
 
 		total.packets += READ_ONCE(stats->packets);
 		total.batches += READ_ONCE(stats->batches);
@@ -213,6 +213,9 @@ static int __init x4b_banset_hook_init(void)
 {
 	int ret;
 
+	hook_stats = alloc_percpu(struct x4b_hook_stats);
+	if (!hook_stats)
+		return -ENOMEM;
 	batch_size = clamp_t(uint, batch_size, 1,
 			     X4B_BANSET_NATIVE_MAX_BATCH);
 	lookup_mode = min_t(uint, lookup_mode, 3);
@@ -266,6 +269,7 @@ put_symbols:
 		symbol_put(x4b_netflow_record_xdp_native);
 	if (netflow_skb_fn)
 		symbol_put(x4b_netflow_record_skb_native);
+	free_percpu(hook_stats);
 	return ret;
 }
 
@@ -280,6 +284,7 @@ static void __exit x4b_banset_hook_exit(void)
 		symbol_put(x4b_netflow_record_xdp_native);
 	if (netflow_skb_fn)
 		symbol_put(x4b_netflow_record_skb_native);
+	free_percpu(hook_stats);
 }
 
 module_init(x4b_banset_hook_init);
