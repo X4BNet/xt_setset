@@ -153,6 +153,9 @@ MODULE_PARM_DESC(packed_meta, "co-locate IPv4 signatures and state by bucket");
 static bool primary_first;
 module_param(primary_first, bool, 0444);
 MODULE_PARM_DESC(primary_first, "batch primary buckets before secondary misses");
+static bool homogeneous_batch = true;
+module_param(homogeneous_batch, bool, 0444);
+MODULE_PARM_DESC(homogeneous_batch, "specialize raw batches for one IPv4 table");
 static bool fast_prng;
 module_param(fast_prng, bool, 0444);
 MODULE_PARM_DESC(fast_prng, "use a securely seeded per-CPU PRNG for refresh sampling");
@@ -2044,7 +2047,7 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 	rcu_read_lock_bh();
 	scratch = this_cpu_ptr(&banset_native_scratch);
 	/* Raw i40e batches are homogeneous by construction: resolve once. */
-	if (frames && frame_dev) {
+	if (homogeneous_batch && frames && frame_dev) {
 		struct net_device *dev = frame_dev;
 		struct banset *set;
 		struct banset_table *table;

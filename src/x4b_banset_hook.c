@@ -42,6 +42,10 @@ static bool netflow = true;
 module_param(netflow, bool, 0444);
 MODULE_PARM_DESC(netflow, "record status-32 NetFlow for hits");
 
+static bool shared_parse = true;
+module_param(shared_parse, bool, 0444);
+MODULE_PARM_DESC(shared_parse, "reuse banset parse results in native NetFlow");
+
 static uint refresh_threshold = X4B_REFRESH_ONE_PERCENT;
 module_param(refresh_threshold, uint, 0644);
 MODULE_PARM_DESC(refresh_threshold, "u32 sampled-expiry refresh threshold");
@@ -135,7 +139,8 @@ static u64 x4b_hook_frame_batch(const struct x4b_rx_frame_batch *batch)
 
 	stats->timing_calls++;
 	sample = !(stats->timing_calls & 1023);
-	hits = x4b_banset_match_frame_batch(batch, scratch->parsed,
+	hits = x4b_banset_match_frame_batch(batch,
+					       shared_parse ? scratch->parsed : NULL,
 					       READ_ONCE(refresh_threshold),
 					       lookup_mode);
 	hit_count = hweight64(hits);
@@ -158,7 +163,7 @@ static u64 x4b_hook_frame_batch(const struct x4b_rx_frame_batch *batch)
 
 		if (sample)
 			netflow_started = rdtsc_ordered();
-		netflow_batch.parsed = scratch->parsed;
+		netflow_batch.parsed = shared_parse ? scratch->parsed : NULL;
 		errors = netflow_frame_batch_fn(&netflow_batch, hits, X4B_STATUS_BANNED,
 						true);
 		if (sample) {
