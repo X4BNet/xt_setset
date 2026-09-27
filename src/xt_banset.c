@@ -148,7 +148,7 @@ static uint prefetch_distance = 8;
 module_param(prefetch_distance, uint, 0644);
 MODULE_PARM_DESC(prefetch_distance, "IPv4 batch lookup prefetch distance");
 static bool packed_meta;
-module_param(packed_meta, bool, 0444);
+module_param(packed_meta, bool, 0644);
 MODULE_PARM_DESC(packed_meta, "co-locate IPv4 signatures and state by bucket");
 static bool primary_first;
 module_param(primary_first, bool, 0644);
