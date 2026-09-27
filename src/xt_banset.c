@@ -175,7 +175,7 @@ struct banset_native_timing_cpu {
 	u64 total;
 };
 
-static DEFINE_PER_CPU(struct banset_native_timing_cpu, banset_native_timing);
+static struct banset_native_timing_cpu __percpu *banset_native_timing;
 
 static __always_inline u64 banset_cycles(void)
 {
@@ -1999,8 +1999,8 @@ struct banset_native_scratch {
 	u8 families[X4B_BANSET_NATIVE_MAX_BATCH];
 };
 
-static DEFINE_PER_CPU(struct banset_native_scratch, banset_native_scratch);
-static DEFINE_PER_CPU(struct rnd_state, banset_native_prng);
+static struct banset_native_scratch __percpu *banset_native_scratch;
+static struct rnd_state __percpu *banset_native_prng;
 
 static __always_inline void
 banset_prefetch_bucket(const struct banset_table *table, u32 bucket)
@@ -2038,14 +2038,14 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 
 	if (!count || count > X4B_BANSET_NATIVE_MAX_BATCH)
 		return 0;
-	timing = this_cpu_ptr(&banset_native_timing);
+	timing = this_cpu_ptr(banset_native_timing);
 	timing->calls++;
 	shift = min_t(u32, READ_ONCE(timing_shift), 30);
 	sample = !(timing->calls & ((1ULL << shift) - 1));
 	if (sample)
 		total_start = stage_start = banset_cycles();
 	rcu_read_lock_bh();
-	scratch = this_cpu_ptr(&banset_native_scratch);
+	scratch = this_cpu_ptr(banset_native_scratch);
 	/* Raw i40e batches are homogeneous by construction: resolve once. */
 	if (homogeneous_batch && frames && frame_dev) {
 		struct net_device *dev = frame_dev;
@@ -2316,7 +2316,7 @@ parsed:
 #endif
 	if (hits && refresh_threshold && refresh_threshold != U32_MAX) {
 		if (fast_prng) {
-			struct rnd_state *prng = this_cpu_ptr(&banset_native_prng);
+			struct rnd_state *prng = this_cpu_ptr(banset_native_prng);
 
 			for (i = 0; i < count; i++)
 				scratch->random[i] = prandom_u32_state(prng);
@@ -2386,7 +2386,7 @@ void x4b_banset_native_timing_read(struct x4b_banset_native_timing *out)
 	memset(out, 0, sizeof(*out));
 	for_each_possible_cpu(cpu) {
 		const struct banset_native_timing_cpu *timing =
-			per_cpu_ptr(&banset_native_timing, cpu);
+			per_cpu_ptr(banset_native_timing, cpu);
 
 		out->calls += READ_ONCE(timing->calls);
 		out->samples += READ_ONCE(timing->samples);
@@ -2451,21 +2451,43 @@ static int __init banset_init(void)
 {
 	int ret;
 
-	prandom_init_once(&banset_native_prng);
+	banset_native_timing = alloc_percpu(struct banset_native_timing_cpu);
+	if (!banset_native_timing)
+		return -ENOMEM;
+	banset_native_scratch = alloc_percpu(struct banset_native_scratch);
+	if (!banset_native_scratch) {
+		ret = -ENOMEM;
+		goto free_timing;
+	}
+	banset_native_prng = alloc_percpu(struct rnd_state);
+	if (!banset_native_prng) {
+		ret = -ENOMEM;
+		goto free_scratch;
+	}
+	prandom_init_once(banset_native_prng);
 	ret = ip_set_type_register(&banset_type);
 	if (ret)
-		return ret;
+		goto free_prng;
 	ret = xt_register_matches(banset_matches, ARRAY_SIZE(banset_matches));
 	if (ret) {
 		ip_set_type_unregister(&banset_type);
-		return ret;
+		goto free_prng;
 	}
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_XDP,
 					 &x4b_banset_kfunc_set);
 	if (ret) {
 		xt_unregister_matches(banset_matches, ARRAY_SIZE(banset_matches));
 		ip_set_type_unregister(&banset_type);
+		goto free_prng;
 	}
+	return 0;
+
+free_prng:
+	free_percpu(banset_native_prng);
+free_scratch:
+	free_percpu(banset_native_scratch);
+free_timing:
+	free_percpu(banset_native_timing);
 	return ret;
 }
 
@@ -2474,6 +2496,9 @@ static void __exit banset_exit(void)
 	xt_unregister_matches(banset_matches, ARRAY_SIZE(banset_matches));
 	ip_set_type_unregister(&banset_type);
 	rcu_barrier();
+	free_percpu(banset_native_prng);
+	free_percpu(banset_native_scratch);
+	free_percpu(banset_native_timing);
 }
 
 module_init(banset_init);

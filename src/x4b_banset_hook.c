@@ -74,7 +74,7 @@ struct x4b_hook_scratch {
 };
 
 static struct x4b_hook_stats __percpu *hook_stats;
-static DEFINE_PER_CPU(struct x4b_hook_scratch, hook_scratch);
+static struct x4b_hook_scratch __percpu *hook_scratch;
 static struct proc_dir_entry *stats_proc;
 static int (*netflow_skb_fn)(struct sk_buff *, u8, bool);
 static int (*netflow_xdp_fn)(struct xdp_buff *, u8, bool);
@@ -130,7 +130,7 @@ static u64 x4b_hook_xdp_batch(struct xdp_buff **packets, u32 count)
 static u64 x4b_hook_frame_batch(const struct x4b_rx_frame_batch *batch)
 {
 	struct x4b_hook_stats *stats = this_cpu_ptr(hook_stats);
-	struct x4b_hook_scratch *scratch = this_cpu_ptr(&hook_scratch);
+	struct x4b_hook_scratch *scratch = this_cpu_ptr(hook_scratch);
 	struct x4b_rx_frame_batch netflow_batch = *batch;
 	u64 netflow_started = 0;
 	bool sample;
@@ -278,6 +278,11 @@ static int __init x4b_banset_hook_init(void)
 	hook_stats = alloc_percpu(struct x4b_hook_stats);
 	if (!hook_stats)
 		return -ENOMEM;
+	hook_scratch = alloc_percpu(struct x4b_hook_scratch);
+	if (!hook_scratch) {
+		free_percpu(hook_stats);
+		return -ENOMEM;
+	}
 	batch_size = clamp_t(uint, batch_size, 1,
 			     X4B_BANSET_NATIVE_MAX_BATCH);
 	lookup_mode = min_t(uint, lookup_mode, 3);
@@ -336,6 +341,7 @@ put_symbols:
 		symbol_put(x4b_netflow_record_xdp_native);
 	if (netflow_skb_fn)
 		symbol_put(x4b_netflow_record_skb_native);
+	free_percpu(hook_scratch);
 	free_percpu(hook_stats);
 	return ret;
 }
@@ -351,6 +357,7 @@ static void __exit x4b_banset_hook_exit(void)
 		symbol_put(x4b_netflow_record_xdp_native);
 	if (netflow_skb_fn)
 		symbol_put(x4b_netflow_record_skb_native);
+	free_percpu(hook_scratch);
 	free_percpu(hook_stats);
 }
 
