@@ -168,6 +168,7 @@ static atomic64_t native_seq_retries = ATOMIC64_INIT(0);
 struct banset_native_timing_cpu {
 	u64 calls;
 	u64 samples;
+	u64 refreshes;
 	u64 parse;
 	u64 hash;
 	u64 primary;
@@ -2330,9 +2331,11 @@ parsed:
 		for (i = 0; i < count; i++)
 			if ((hits & BIT_ULL(i)) &&
 			    (refresh_threshold == U32_MAX ||
-			     scratch->random[i] < refresh_threshold))
+			     scratch->random[i] < refresh_threshold)) {
 				banset_refresh(scratch->sets[i], &scratch->keys[i],
 					       scratch->sets[i]->timeout);
+				timing->refreshes++;
+			}
 	if (sample) {
 		u64 stamp = banset_cycles();
 
@@ -2380,6 +2383,18 @@ u64 x4b_banset_native_seq_retries(void)
 }
 EXPORT_SYMBOL_GPL(x4b_banset_native_seq_retries);
 
+u64 x4b_banset_native_refreshes(void)
+{
+	u64 refreshes = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		refreshes += READ_ONCE(per_cpu_ptr(banset_native_timing,
+						      cpu)->refreshes);
+	return refreshes;
+}
+EXPORT_SYMBOL_GPL(x4b_banset_native_refreshes);
+
 void x4b_banset_native_timing_read(struct x4b_banset_native_timing *out)
 {
 	int cpu;
@@ -2412,6 +2427,7 @@ static const struct x4b_hpfw_banset_provider banset_hpfw_provider = {
 	.struct_size = sizeof(struct x4b_hpfw_banset_provider),
 	.match_frame_batch = banset_hpfw_match_frame_batch,
 	.seq_retries = x4b_banset_native_seq_retries,
+	.refreshes = x4b_banset_native_refreshes,
 };
 
 const struct x4b_hpfw_banset_provider *x4b_banset_hpfw_provider(void)
