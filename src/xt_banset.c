@@ -2332,9 +2332,9 @@ parsed:
 			if ((hits & BIT_ULL(i)) &&
 			    (refresh_threshold == U32_MAX ||
 			     scratch->random[i] < refresh_threshold)) {
-				banset_refresh(scratch->sets[i], &scratch->keys[i],
-					       scratch->sets[i]->timeout);
-				timing->refreshes++;
+				if (!banset_refresh(scratch->sets[i], &scratch->keys[i],
+						    scratch->sets[i]->timeout))
+					timing->refreshes++;
 			}
 	if (sample) {
 		u64 stamp = banset_cycles();
