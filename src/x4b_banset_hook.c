@@ -43,7 +43,7 @@ module_param(netflow, bool, 0444);
 MODULE_PARM_DESC(netflow, "record status-32 NetFlow for hits");
 
 static bool shared_parse = true;
-module_param(shared_parse, bool, 0444);
+module_param(shared_parse, bool, 0644);
 MODULE_PARM_DESC(shared_parse, "reuse banset parse results in native NetFlow");
 
 static uint refresh_threshold = X4B_REFRESH_ONE_PERCENT;
@@ -231,6 +231,7 @@ static int x4b_hook_stats_show(struct seq_file *seq, void *unused)
 	}
 	seq_printf(seq, "stage %s\nbatch_size %u\nlookup_mode %u\nnetflow %u\n",
 		   stage, batch_size, lookup_mode, netflow);
+	seq_printf(seq, "shared_parse %u\n", shared_parse);
 	seq_printf(seq, "packets %llu\nbatches %llu\nhits %llu\nnetflow_errors %llu\n",
 		   total.packets, total.batches, total.hits,
 		   total.netflow_errors);
