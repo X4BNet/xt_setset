@@ -3,6 +3,10 @@
 #define _X4B_BANSET_NATIVE_H
 
 #include <linux/types.h>
+
+#include "compat_def.h"
+
+#ifdef HAVE_X4B_HPFW_PROVIDER
 #include <linux/x4b_hpfw.h>
 #include <linux/x4b_rx_hook.h>
 
@@ -33,5 +37,6 @@ u64 x4b_banset_native_seq_retries(void);
 u64 x4b_banset_native_refreshes(void);
 void x4b_banset_native_timing_read(struct x4b_banset_native_timing *timing);
 const struct x4b_hpfw_banset_provider *x4b_banset_hpfw_provider(void);
+#endif
 
 #endif

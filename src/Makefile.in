@@ -33,21 +33,23 @@ define build_kernel_modules
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules CONFIG_DEBUG_INFO=y
 endef
 
-xt_setset.ko: xt_setset.c Makefile
+xt_setset.ko: xt_setset.c compat_def.h Makefile
 	@echo Compiling for kernel $(KVERSION)
 	$(build_kernel_modules)
 	@touch $@
 
-xt_banset.ko: xt_banset.c xt_banset.h Makefile
+xt_banset.ko: xt_banset.c xt_banset.h x4b_banset_native.h compat_def.h Makefile
 	@echo Compiling for kernel $(KVERSION)
 	$(build_kernel_modules)
 	@touch $@
 
-sparse: | xt_setset.c Makefile
+sparse: | xt_setset.c compat_def.h Makefile
 	@rm -f xt_setset.ko xt_setset.o
 	@echo Compiling for kernel $(KVERSION)
 	make -C $(KDIR) M=$(CURDIR) modules C=1
 	@touch xt_setset.ko
+compat_def.h: gen_compat_def Makefile
+	bash ./gen_compat_def > $@
 minstall: | xt_setset.ko
 	@echo " *"
 	make -C $(KDIR) M=$(CURDIR) modules_install INSTALL_MOD_PATH=$(DESTDIR)
@@ -57,7 +59,7 @@ mclean:
 lclean:
 	-rm -f *.so *_sh.o
 clean: mclean lclean
-	-rm -f *.so *.o modules.order
+	-rm -f *.so *.o modules.order compat_def.h
 
 libxt_setset_sh.o: libxt_setset.c
 	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_setset.c

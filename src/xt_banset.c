@@ -2,9 +2,6 @@
 /* X4B exact source/destination ban table and direct xtables match. */
 
 #include <linux/bitmap.h>
-#include <linux/bpf.h>
-#include <linux/btf.h>
-#include <linux/btf_ids.h>
 #include <linux/errno.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
@@ -22,7 +19,15 @@
 #include <linux/skbuff.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
+
+#include "compat_def.h"
+
+#ifdef HAVE_X4B_HPFW_PROVIDER
+#include <linux/bpf.h>
+#include <linux/btf.h>
+#include <linux/btf_ids.h>
 #include <linux/x4b_hpfw.h>
+#endif
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/ipset/ip_set.h>
@@ -31,7 +36,9 @@
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/netlink.h>
+#ifdef HAVE_X4B_HPFW_PROVIDER
 #include <net/xdp.h>
+#endif
 
 #if defined(CONFIG_X86_64)
 #include <asm/cpufeature.h>
@@ -41,7 +48,9 @@
 #endif
 
 #include "xt_banset.h"
+#ifdef HAVE_X4B_HPFW_PROVIDER
 #include "x4b_banset_native.h"
+#endif
 
 #define BANSET_REV_MIN 0
 #define BANSET_REV_MAX 5
@@ -1508,21 +1517,36 @@ static void banset_flush(struct ip_set *ipset)
 		goto out_rcu;
 	spin_lock_bh(&table->lock);
 	write_seqcount_begin(&table->seq);
-	memset(table->occupied, 0, table->bucket_mask + 1);
-	memset(table->signature, 0,
-	       table->capacity * sizeof(*table->signature));
-	if (table->state)
-		memset(table->state, 0, table->capacity * sizeof(*table->state));
+	if (table->v4_meta) {
+		memset(table->v4_meta, 0,
+		       (table->bucket_mask + 1) * sizeof(*table->v4_meta));
+	} else {
+		memset(table->occupied, 0, table->bucket_mask + 1);
+		memset(table->signature, 0,
+		       table->capacity * sizeof(*table->signature));
+		if (table->state)
+			memset(table->state, 0,
+			       table->capacity * sizeof(*table->state));
+	}
 	growing = table->growing;
 	if (growing) {
 		spin_lock(&growing->lock);
 		write_seqcount_begin(&growing->seq);
-		memset(growing->occupied, 0, growing->bucket_mask + 1);
-		memset(growing->signature, 0,
-		       growing->capacity * sizeof(*growing->signature));
-		if (growing->state)
-			memset(growing->state, 0,
-			       growing->capacity * sizeof(*growing->state));
+		if (growing->v4_meta) {
+			memset(growing->v4_meta, 0,
+			       (growing->bucket_mask + 1) *
+			       sizeof(*growing->v4_meta));
+		} else {
+			memset(growing->occupied, 0,
+			       growing->bucket_mask + 1);
+			memset(growing->signature, 0,
+			       growing->capacity *
+			       sizeof(*growing->signature));
+			if (growing->state)
+				memset(growing->state, 0,
+				       growing->capacity *
+				       sizeof(*growing->state));
+		}
 		write_seqcount_end(&growing->seq);
 		spin_unlock(&growing->lock);
 	}
@@ -1850,6 +1874,7 @@ static struct banset *banset_find_binding_rcu(const char *name, u8 family,
 	return NULL;
 }
 
+#ifdef HAVE_X4B_HPFW_PROVIDER
 static int banset_frame_key(const void *frame_data, const void *frame_data_end,
 			    union banset_key *key, u8 *family,
 			    struct x4b_rx_parse *parsed)
@@ -2482,11 +2507,13 @@ static const struct btf_kfunc_id_set x4b_banset_kfunc_set = {
 	.owner = THIS_MODULE,
 	.set = &x4b_banset_kfunc_ids,
 };
+#endif
 
 static int __init banset_init(void)
 {
 	int ret;
 
+#ifdef HAVE_X4B_HPFW_PROVIDER
 	banset_native_timing = alloc_percpu(struct banset_native_timing_cpu);
 	if (!banset_native_timing)
 		return -ENOMEM;
@@ -2501,14 +2528,24 @@ static int __init banset_init(void)
 		goto free_scratch;
 	}
 	prandom_init_once(banset_native_prng);
+#endif
 	ret = ip_set_type_register(&banset_type);
 	if (ret)
+#ifdef HAVE_X4B_HPFW_PROVIDER
 		goto free_prng;
+#else
+		return ret;
+#endif
 	ret = xt_register_matches(banset_matches, ARRAY_SIZE(banset_matches));
 	if (ret) {
 		ip_set_type_unregister(&banset_type);
+#ifdef HAVE_X4B_HPFW_PROVIDER
 		goto free_prng;
+#else
+		return ret;
+#endif
 	}
+#ifdef HAVE_X4B_HPFW_PROVIDER
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_XDP,
 					 &x4b_banset_kfunc_set);
 	if (ret) {
@@ -2525,6 +2562,9 @@ free_scratch:
 free_timing:
 	free_percpu(banset_native_timing);
 	return ret;
+#else
+	return 0;
+#endif
 }
 
 static void __exit banset_exit(void)
@@ -2532,9 +2572,11 @@ static void __exit banset_exit(void)
 	xt_unregister_matches(banset_matches, ARRAY_SIZE(banset_matches));
 	ip_set_type_unregister(&banset_type);
 	rcu_barrier();
+#ifdef HAVE_X4B_HPFW_PROVIDER
 	free_percpu(banset_native_prng);
 	free_percpu(banset_native_scratch);
 	free_percpu(banset_native_timing);
+#endif
 }
 
 module_init(banset_init);

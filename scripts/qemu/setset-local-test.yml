@@ -161,3 +161,24 @@
         ipset test banset_growth 198.51.100.1,192.0.2.1,0
       args:
         executable: /bin/bash
+
+    - name: test packed IPv4 metadata flush
+      ansible.builtin.shell: |
+        set -eu
+        cleanup() {
+          ipset destroy banset_packed 2>/dev/null || true
+          printf 'N\n' > /sys/module/xt_banset/parameters/packed_meta
+        }
+        trap cleanup EXIT
+        printf 'Y\n' > /sys/module/xt_banset/parameters/packed_meta
+        ipset create banset_packed hash:ip,ip,flag family inet \
+          hashsize 262144 maxelem 65536 timeout 600
+        ipset add banset_packed 203.0.113.1,192.0.2.1,17 timeout 600
+        ipset test banset_packed 203.0.113.1,192.0.2.1,0
+        ipset flush banset_packed
+        ! ipset test banset_packed 203.0.113.1,192.0.2.1,0
+        ipset add banset_packed 203.0.113.2,192.0.2.1,18 timeout 600
+        ipset test banset_packed 203.0.113.2,192.0.2.1,0
+      args:
+        executable: /bin/bash
+      changed_when: false
