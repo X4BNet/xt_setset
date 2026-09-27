@@ -83,7 +83,7 @@ echo "! Installing $MVERSION into DKMS..."
 install_root="/usr/src/${MODULE_NAME}-$MVERSION"
 rm -rf "$install_root"
 mkdir -p "$install_root"
-cp -p ./*.[ch] Makefile.in configure dkms.conf version.sh install-dkms.sh "$install_root/"
+cp -p ./*.[ch] Makefile.in configure dkms.conf version.sh install-dkms.sh gen_compat_def "$install_root/"
 
 rm -f "$install_root"/Makefile "$install_root"/Module.symvers "$install_root"/modules.order
 rm -f "$install_root"/*.ko "$install_root"/*.so "$install_root"/*_sh.o

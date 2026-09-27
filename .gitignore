@@ -8,8 +8,10 @@
 *.so
 *_sh.o
 .*.cmd
+.*.o.d
 modules.order
 Module.symvers
 
 # Generated files
 src/Makefile
+src/compat_def.h

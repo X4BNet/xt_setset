@@ -62,6 +62,49 @@ You can disable DKMS during configuration if needed:
 ./configure --disable-dkms-install   # Build with DKMS support but don't auto-install
 ```
 
-## xt_setban
+## xt_banset
 
-a single rule banning module
+`xt_banset` owns the exact-pair `hash:ip,ip,flag` ipset type and supplies a
+packet lookup path that does not enter the ipset core. Sets must have a positive
+timeout of at most 1,048,513 seconds and accept only scalar source/destination
+addresses, an 8-bit flag, and IPv4 or IPv6 families.
+
+```bash
+ipset create ban hash:ip,ip,flag family inet timeout 600 maxelem 2097152
+ipset add ban 192.0.2.1,198.51.100.10,7 timeout 600
+iptables -t raw -A PREROUTING \
+  -m banset --ban-set ban --ban-mode refresh --ban-probability 0.01 \
+  -j DROP
+```
+
+The direct match modes are `match`, `refresh`, and `add`. Probability applies
+to refresh/add mutations; a refresh rule still reports the membership result
+on every packet. Ranges, networks, permanent entries, counters, comments,
+skbinfo, and force-add are intentionally unsupported.
+
+## XDP acceleration
+
+The XDP-capable branch builds `src/x4b_banset_xdp.bpf.o`. Its production
+program is in section `xdp/x4b_banset`; it looks up the live `ban`/`ban6`
+tables through `bpf_x4b_banset_match`, refreshes hits with a 1% sample, records
+NetFlow status 32 through `bpf_x4b_netflow_xdp_record`, and drops the packet.
+Lookup errors, malformed packets, unsupported protocols, and misses pass to the
+normal stack, where a direct netfilter rule should remain installed as fallback.
+
+The object also contains `xdp/x4b_banset_lookup` (drop hits without NetFlow)
+and `xdp/x4b_pass` sections for controlled benchmarks. Per-CPU pass, hit, drop,
+lookup-error, and NetFlow-error counters are exposed in the
+`x4b_banset_stats` map.
+
+## Native receive hook
+
+The versioned GPL provider exported by `xt_banset.ko` is consumed by the
+separate `x4b_hpfw.ko` module. Keeping hook ownership out of this repository
+allows HPFW to enter an RCU-safe bypass before the banset control-plane module
+is reloaded. The optional XDP object remains available as a rollback path.
+
+The build probes the selected kernel with kbuild rather than inferring support
+from its release number. When the versioned HPFW headers and receive-hook ABI
+are absent, `xt_setset.ko`, `xt_banset.ko`, and their userspace plugins still
+build normally, but the HPFW provider and XDP kfunc are omitted from
+`xt_banset.ko`.

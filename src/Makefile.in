@@ -6,29 +6,50 @@ KINSTDIR = $(shell dirname @KDIR@)
 KOPTS = @KOPTS@
 IPTABLES_CFLAGS = @IPTABLES_CFLAGS@
 IPTABLES_MODULES = @IPTABLES_MODULES@
+IPSET_MODULES ?= $(shell pkg-config --variable=libdir libipset)/ipset
 DEPMOD = /sbin/depmod -a $(KVERSION)
 CARGS = @CARGS@
 CC = gcc
+BPF_CLANG ?= clang
+BPF_ARCH := $(shell uname -m | sed -e 's/x86_64/x86/' -e 's/aarch64/arm64/')
+BPF_SYS_INCLUDES := -I/usr/include/$(shell $(CC) -dumpmachine)
 
 # https://www.kernel.org/doc/Documentation/kbuild/modules.txt
 # https://www.kernel.org/doc/Documentation/kbuild/makefiles.txt
 X4B_SOURCE_COMMIT = @GIT_COMMIT@
 X4B_GIT_COMMIT := $(shell git -c safe.directory=$(abspath $(src)/..) -C $(src)/.. rev-parse --verify HEAD 2>/dev/null || echo $(X4B_SOURCE_COMMIT))
-obj-m = xt_setset.o
+obj-m = xt_setset.o xt_banset.o
 ccflags-y = @KOPTS@ -DX4B_GIT_COMMIT='"$(X4B_GIT_COMMIT)"'
 
-all: xt_setset.ko libxt_setset.so
+all: xt_setset.ko xt_banset.ko libxt_setset.so libxt_banset.so libipset_hash_ipipflag.so x4b_banset_xdp.bpf.o
 
-xt_setset.ko: xt_setset.c Makefile
+define build_kernel_modules
+	@btf_link="$(KDIR)/vmlinux"; created=0; \
+	if test "$(KVERSION)" = "`uname -r`" && test ! -e "$$btf_link" && \
+	   test -r /sys/kernel/btf/vmlinux; then \
+		ln -s /sys/kernel/btf/vmlinux "$$btf_link" && created=1; \
+	fi; \
+	trap 'if test "$$created" = 1 && test "`readlink "$$btf_link"`" = /sys/kernel/btf/vmlinux; then unlink "$$btf_link"; fi' EXIT; \
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules CONFIG_DEBUG_INFO=y
+endef
+
+xt_setset.ko: xt_setset.c compat_def.h Makefile
 	@echo Compiling for kernel $(KVERSION)
-	make -C $(KDIR) M=$(CURDIR) modules CONFIG_DEBUG_INFO=y
+	$(build_kernel_modules)
 	@touch $@
-	
-sparse: | xt_setset.c Makefile
+
+xt_banset.ko: xt_banset.c xt_banset.h x4b_banset_native.h compat_def.h Makefile
+	@echo Compiling for kernel $(KVERSION)
+	$(build_kernel_modules)
+	@touch $@
+
+sparse: | xt_setset.c compat_def.h Makefile
 	@rm -f xt_setset.ko xt_setset.o
 	@echo Compiling for kernel $(KVERSION)
 	make -C $(KDIR) M=$(CURDIR) modules C=1
 	@touch xt_setset.ko
+compat_def.h: gen_compat_def Makefile
+	bash ./gen_compat_def > $@
 minstall: | xt_setset.ko
 	@echo " *"
 	make -C $(KDIR) M=$(CURDIR) modules_install INSTALL_MOD_PATH=$(DESTDIR)
@@ -38,17 +59,29 @@ mclean:
 lclean:
 	-rm -f *.so *_sh.o
 clean: mclean lclean
-	-rm -f *.so *.o modules.order
+	-rm -f *.so *.o modules.order compat_def.h
 
 libxt_setset_sh.o: libxt_setset.c
 	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_setset.c
 
 %.so: %_sh.o
-	gcc -shared -o $@ $< -lxtables
+	gcc -shared -nostartfiles -o $@ $< -lxtables
 
-linstall: | libxt_setset.so
+libxt_banset_sh.o: libxt_banset.c xt_banset.h
+	gcc -O2 -Wall -Wunused $(IPTABLES_CFLAGS) -fPIC -o $@ -c libxt_banset.c
+
+libipset_hash_ipipflag.so: libipset_hash_ipipflag.c
+	$(CC) -O2 -Wall -Wextra -fPIC -shared -o $@ $< $$(pkg-config --cflags --libs libipset)
+
+x4b_banset_xdp.bpf.o: x4b_banset_xdp.bpf.c
+	$(BPF_CLANG) -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_ARCH) \
+		$(BPF_SYS_INCLUDES) -Wall -Werror -c $< -o $@
+
+linstall: | libxt_setset.so libxt_banset.so libipset_hash_ipipflag.so
 	@echo " *"
 	install -D libxt_setset.so $(DESTDIR)$(IPTABLES_MODULES)/libxt_setset.so
+	install -D libxt_banset.so $(DESTDIR)$(IPTABLES_MODULES)/libxt_banset.so
+	install -D libipset_hash_ipipflag.so $(DESTDIR)$(IPSET_MODULES)/libipset_hash_ipipflag.so
 
 dinstall:
 	@echo " *"
@@ -58,17 +91,22 @@ install: dinstall linstall
 
 uninstall:
 	-rm -f $(DESTDIR)$(IPTABLES_MODULES)/libxt_setset.so
+	-rm -f $(DESTDIR)$(IPTABLES_MODULES)/libxt_banset.so
+	-rm -f $(DESTDIR)$(IPSET_MODULES)/libipset_hash_ipipflag.so
 	@if [ "@DKMSINSTALL@" = dinstall ]; then ./install-dkms.sh --uninstall; fi
 	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_setset.ko
+	-rm -f $(DESTDIR)$(KINSTDIR)/extra/xt_banset.ko
 
 Makefile: Makefile.in configure
 	./configure --make ${CARGS}
 
 load: all
+	-insmod xt_banset.ko
 	-insmod xt_setset.ko
 
 unload:
 	-rmmod xt_setset.ko
+	-rmmod xt_banset.ko
 
 reload: unload load
 
