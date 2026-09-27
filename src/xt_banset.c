@@ -59,6 +59,10 @@
 #define BANSET_MAX_CAPACITY (1U << 21)
 #define BANSET_BFS_MAX 1000U
 #define BANSET_EPOCH_SHIFT 5
+#define BANSET_EPOCH_SECONDS (1U << BANSET_EPOCH_SHIFT)
+/* u16 epochs are compared as s16; reserve one partial starting epoch. */
+#define BANSET_MAX_TIMEOUT \
+	((u32)S16_MAX * BANSET_EPOCH_SECONDS - (BANSET_EPOCH_SECONDS - 1U))
 #define BANSET_DEFAULT_TTL 600U
 
 MODULE_LICENSE("GPL");
@@ -131,9 +135,13 @@ struct banset {
 	u32 maxelem;
 	u32 timeout;
 	u8 family;
-	bool bound;
-	struct net *net;
+};
+
+struct banset_binding {
+	/* Keep ipset name ownership independent of backend storage across swap. */
 	struct ip_set *set;
+	struct net *net;
+	u8 family;
 	struct list_head bindings;
 };
 
@@ -154,12 +162,13 @@ static DEFINE_MUTEX(banset_bindings_lock);
 static bool full_alt = true;
 module_param(full_alt, bool, 0444);
 MODULE_PARM_DESC(full_alt, "spread alternate buckets across the full table");
-static uint prefetch_distance = 8;
-module_param(prefetch_distance, uint, 0644);
-MODULE_PARM_DESC(prefetch_distance, "IPv4 batch lookup prefetch distance");
 static bool packed_meta;
 module_param(packed_meta, bool, 0644);
 MODULE_PARM_DESC(packed_meta, "co-locate IPv4 signatures and state by bucket");
+#ifdef HAVE_X4B_HPFW_PROVIDER
+static uint prefetch_distance = 8;
+module_param(prefetch_distance, uint, 0644);
+MODULE_PARM_DESC(prefetch_distance, "IPv4 batch lookup prefetch distance");
 static bool primary_first = true;
 module_param(primary_first, bool, 0644);
 MODULE_PARM_DESC(primary_first, "batch primary buckets before secondary misses");
@@ -196,6 +205,7 @@ static __always_inline u64 banset_cycles(void)
 	return 0;
 #endif
 }
+#endif
 
 static inline u16 banset_epoch(void)
 {
@@ -204,10 +214,10 @@ static inline u16 banset_epoch(void)
 
 static inline u16 banset_expiry(u32 timeout)
 {
-	u32 epochs = DIV_ROUND_UP(timeout, 1U << BANSET_EPOCH_SHIFT);
+	u64 expires = ktime_get_boottime_seconds() + timeout;
 
-	epochs = clamp_t(u32, epochs, 1, S16_MAX);
-	return banset_epoch() + epochs;
+	return (u16)((expires + BANSET_EPOCH_SECONDS - 1) >>
+		     BANSET_EPOCH_SHIFT);
 }
 
 static inline bool banset_expired(u16 expires, u16 now)
@@ -752,7 +762,7 @@ static int banset_lookup_table(const struct banset_table *table,
 	return result;
 }
 
-#if defined(CONFIG_X86_64)
+#if defined(CONFIG_X86_64) && defined(HAVE_X4B_HPFW_PROVIDER)
 /* kernel_fpu_begin() must bracket this helper. */
 static __always_inline u8
 banset4_bucket_matches_xmm(const struct banset4_bucket *bucket,
@@ -1116,8 +1126,8 @@ static int banset_grow(struct banset *set)
 		banset_table_put(new);
 	else {
 		banset_table_put(old);
-		pr_info("set %s: grew to %u slots (%zu bytes)\n",
-			set->set->name, new->capacity, banset_table_memsize(new));
+		pr_info("banset family %u: grew to %u slots (%zu bytes)\n",
+			set->family, new->capacity, banset_table_memsize(new));
 	}
 out_unlock:
 	mutex_unlock(&set->resize_mutex);
@@ -1129,7 +1139,8 @@ static void banset_grow_work(struct work_struct *work)
 	struct banset *set = container_of(work, struct banset, grow_work);
 
 	if (banset_grow(set))
-		pr_warn_ratelimited("set %s: unable to grow table\n", set->set->name);
+		pr_warn_ratelimited("banset family %u: unable to grow table\n",
+				    set->family);
 }
 
 static void banset_gc_work(struct work_struct *work)
@@ -1242,6 +1253,8 @@ static int banset_adt_add(struct ip_set *ipset, void *value,
 	}
 	if (!ext->timeout || ext->timeout == IPSET_NO_TIMEOUT)
 		return -IPSET_ERR_PROTOCOL;
+	if (ext->timeout > BANSET_MAX_TIMEOUT)
+		return -IPSET_ERR_TIMEOUT;
 	ret = banset_upsert(set, &key, flag, ext->timeout,
 			    !!(flags & IPSET_FLAG_EXIST));
 	if (ret == -EEXIST)
@@ -1575,19 +1588,23 @@ static bool banset_same_set(const struct ip_set *a, const struct ip_set *b)
 static void banset_cancel_gc(struct ip_set *ipset)
 {
 	struct banset *set = ipset->data;
-	bool synchronize = false;
+	struct banset_binding *binding, *removed = NULL;
 
 	cancel_delayed_work_sync(&set->gc_work);
 	cancel_work_sync(&set->grow_work);
 	mutex_lock(&banset_bindings_lock);
-	if (set->bound) {
-		list_del_rcu(&set->bindings);
-		set->bound = false;
-		synchronize = true;
+	list_for_each_entry(binding, &banset_bindings, bindings) {
+		if (binding->set != ipset)
+			continue;
+		list_del_rcu(&binding->bindings);
+		removed = binding;
+		break;
 	}
 	mutex_unlock(&banset_bindings_lock);
-	if (synchronize)
+	if (removed) {
 		synchronize_rcu();
+		kfree(removed);
+	}
 }
 
 static void banset_destroy(struct ip_set *ipset)
@@ -1645,6 +1662,7 @@ static const struct ip_set_type_variant banset6_variant = {
 static int banset_create(struct net *net, struct ip_set *ipset,
 			 struct nlattr *tb[], u32 flags)
 {
+	struct banset_binding *binding;
 	struct banset_table *table;
 	struct banset *set;
 	u32 cadt_flags = 0;
@@ -1666,6 +1684,8 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 	ipset->timeout = ip_set_timeout_uget(tb[IPSET_ATTR_TIMEOUT]);
 	if (!ipset->timeout || ipset->timeout == IPSET_NO_TIMEOUT)
 		return -IPSET_ERR_PROTOCOL;
+	if (ipset->timeout > BANSET_MAX_TIMEOUT)
+		return -IPSET_ERR_TIMEOUT;
 	if (tb[IPSET_ATTR_MAXELEM])
 		maxelem = ip_set_get_h32(tb[IPSET_ATTR_MAXELEM]);
 	maxelem = clamp_t(u32, maxelem, BANSET_SLOTS, BANSET_MAX_CAPACITY);
@@ -1679,17 +1699,24 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 		banset_table_put(table);
 		return -ENOMEM;
 	}
+	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
+	if (!binding) {
+		banset_table_put(table);
+		kfree(set);
+		return -ENOMEM;
+	}
 	mutex_init(&set->resize_mutex);
 	spin_lock_init(&set->update_lock);
 	INIT_WORK(&set->grow_work, banset_grow_work);
 	INIT_DELAYED_WORK(&set->gc_work, banset_gc_work);
-	INIT_LIST_HEAD(&set->bindings);
 	atomic_set(&set->elements, 0);
 	set->maxelem = maxelem;
 	set->timeout = ipset->timeout;
 	set->family = ipset->family;
-	set->net = net;
-	set->set = ipset;
+	binding->set = ipset;
+	binding->net = net;
+	binding->family = ipset->family;
+	INIT_LIST_HEAD(&binding->bindings);
 	RCU_INIT_POINTER(set->table, table);
 	ipset->data = set;
 	ipset->variant = ipset->family == NFPROTO_IPV4 ?
@@ -1700,13 +1727,13 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 		__alignof__(struct banset6_elem));
 	if (ipset->extensions != IPSET_EXT_TIMEOUT) {
 		banset_table_put(table);
+		kfree(binding);
 		kfree(set);
 		ipset->data = NULL;
 		return -EOPNOTSUPP;
 	}
 	mutex_lock(&banset_bindings_lock);
-	list_add_tail_rcu(&set->bindings, &banset_bindings);
-	set->bound = true;
+	list_add_tail_rcu(&binding->bindings, &banset_bindings);
 	mutex_unlock(&banset_bindings_lock);
 	queue_delayed_work(system_power_efficient_wq, &set->gc_work,
 			   (1U << BANSET_EPOCH_SHIFT) * HZ);
@@ -1757,13 +1784,12 @@ static struct ip_set_type banset_type __read_mostly = {
 static struct banset *banset_find_binding(const char *name, u8 family,
 					  const struct net *net)
 {
-	struct banset *set;
+	struct banset_binding *binding;
 
-	list_for_each_entry(set, &banset_bindings, bindings)
-		if (set->family == family && set->net == net &&
-		    !strncmp(set->set->name, name,
-							 IPSET_MAXNAMELEN))
-			return set;
+	list_for_each_entry(binding, &banset_bindings, bindings)
+		if (binding->family == family && binding->net == net &&
+		    !strncmp(binding->set->name, name, IPSET_MAXNAMELEN))
+			return READ_ONCE(binding->set->data);
 	return NULL;
 }
 
@@ -1865,12 +1891,12 @@ static struct xt_match banset_matches[] __read_mostly = {
 static struct banset *banset_find_binding_rcu(const char *name, u8 family,
 					      const struct net *net)
 {
-	struct banset *set;
+	struct banset_binding *binding;
 
-	list_for_each_entry_rcu(set, &banset_bindings, bindings)
-		if (set->family == family && set->net == net &&
-		    !strncmp(set->set->name, name, IPSET_MAXNAMELEN))
-			return set;
+	list_for_each_entry_rcu(binding, &banset_bindings, bindings)
+		if (binding->family == family && binding->net == net &&
+		    !strncmp(binding->set->name, name, IPSET_MAXNAMELEN))
+			return READ_ONCE(binding->set->data);
 	return NULL;
 }
 

@@ -66,8 +66,8 @@ You can disable DKMS during configuration if needed:
 
 `xt_banset` owns the exact-pair `hash:ip,ip,flag` ipset type and supplies a
 packet lookup path that does not enter the ipset core. Sets must have a positive
-timeout and accept only scalar source/destination addresses, an 8-bit flag, and
-IPv4 or IPv6 families.
+timeout of at most 1,048,513 seconds and accept only scalar source/destination
+addresses, an 8-bit flag, and IPv4 or IPv6 families.
 
 ```bash
 ipset create ban hash:ip,ip,flag family inet timeout 600 maxelem 2097152
@@ -102,3 +102,9 @@ The versioned GPL provider exported by `xt_banset.ko` is consumed by the
 separate `x4b_hpfw.ko` module. Keeping hook ownership out of this repository
 allows HPFW to enter an RCU-safe bypass before the banset control-plane module
 is reloaded. The optional XDP object remains available as a rollback path.
+
+The build probes the selected kernel with kbuild rather than inferring support
+from its release number. When the versioned HPFW headers and receive-hook ABI
+are absent, `xt_setset.ko`, `xt_banset.ko`, and their userspace plugins still
+build normally, but the HPFW provider and XDP kfunc are omitted from
+`xt_banset.ko`.
