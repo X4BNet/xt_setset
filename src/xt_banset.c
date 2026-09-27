@@ -22,6 +22,7 @@
 #include <linux/skbuff.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
+#include <linux/x4b_hpfw.h>
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/ipset/ip_set.h>
@@ -2399,6 +2400,25 @@ void x4b_banset_native_timing_read(struct x4b_banset_native_timing *out)
 	}
 }
 EXPORT_SYMBOL_GPL(x4b_banset_native_timing_read);
+
+static u64 banset_hpfw_match_frame_batch(
+	const struct x4b_rx_frame_batch *batch, u32 refresh_threshold)
+{
+	return x4b_banset_match_frame_batch(batch, NULL, refresh_threshold, 0);
+}
+
+static const struct x4b_hpfw_banset_provider banset_hpfw_provider = {
+	.abi_version = X4B_HPFW_PROVIDER_ABI_V1,
+	.struct_size = sizeof(struct x4b_hpfw_banset_provider),
+	.match_frame_batch = banset_hpfw_match_frame_batch,
+	.seq_retries = x4b_banset_native_seq_retries,
+};
+
+const struct x4b_hpfw_banset_provider *x4b_banset_hpfw_provider(void)
+{
+	return &banset_hpfw_provider;
+}
+EXPORT_SYMBOL_GPL(x4b_banset_hpfw_provider);
 
 __bpf_kfunc_start_defs();
 

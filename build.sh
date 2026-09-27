@@ -205,7 +205,6 @@ for artifact in \
   "$SRC_DIR/Makefile" \
   "$SRC_DIR/xt_setset.ko" \
   "$SRC_DIR/xt_banset.ko" \
-  "$SRC_DIR/x4b_banset_hook.ko" \
   "$SRC_DIR/libxt_setset.so" \
   "$SRC_DIR/libxt_banset.so" \
   "$SRC_DIR/libipset_hash_ipipflag.so" \

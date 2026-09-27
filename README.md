@@ -96,23 +96,9 @@ and `xdp/x4b_pass` sections for controlled benchmarks. Per-CPU pass, hit, drop,
 lookup-error, and NetFlow-error counters are exposed in the
 `x4b_banset_stats` map.
 
-## Native receive-hook experiments
+## Native receive hook
 
-On a kernel carrying the X4B receive-hook patch, `x4b_banset_hook.ko` can run
-the same direct backend either on GRO-normal NAPI lists or in the i40e receive
-loop before skb allocation. The latter supports descriptor look-ahead batches
-of up to 16 packets. IPv4 batch lookups can compare all eight keys in each
-candidate bucket with AVX2 inside one kernel-FPU section per batch; IPv6 and
-unsupported SIMD contexts use the scalar implementation.
-
-```bash
-modprobe x4b_banset_hook stage=napi batch_size=1 simd=0 netflow=1
-modprobe x4b_banset_hook stage=napi batch_size=16 simd=1 netflow=1
-modprobe x4b_banset_hook stage=i40e batch_size=1 simd=0 netflow=1
-modprobe x4b_banset_hook stage=i40e batch_size=16 simd=1 netflow=1
-```
-
-Only one native hook may be registered. Hits are recorded as NetFlow status
-32 with ports suppressed and are then dropped. The normal netfilter banset
-rule should remain installed as a fallback while this experimental interface
-is evaluated. Aggregate counters are available in `/proc/x4b_banset_hook`.
+The versioned GPL provider exported by `xt_banset.ko` is consumed by the
+separate `x4b_hpfw.ko` module. Keeping hook ownership out of this repository
+allows HPFW to enter an RCU-safe bypass before the banset control-plane module
+is reloaded. The optional XDP object remains available as a rollback path.

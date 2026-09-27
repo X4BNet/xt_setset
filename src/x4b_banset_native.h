@@ -3,6 +3,7 @@
 #define _X4B_BANSET_NATIVE_H
 
 #include <linux/types.h>
+#include <linux/x4b_hpfw.h>
 #include <linux/x4b_rx_hook.h>
 
 struct sk_buff;
@@ -30,5 +31,6 @@ u64 x4b_banset_match_frame_batch(const struct x4b_rx_frame_batch *batch,
 					 u32 refresh_threshold, u8 lookup_mode);
 u64 x4b_banset_native_seq_retries(void);
 void x4b_banset_native_timing_read(struct x4b_banset_native_timing *timing);
+const struct x4b_hpfw_banset_provider *x4b_banset_hpfw_provider(void);
 
 #endif
