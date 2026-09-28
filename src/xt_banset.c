@@ -2035,6 +2035,26 @@ banset_frame4_key(const void *frame_data, const void *frame_data_end,
 	return 0;
 }
 
+static __always_inline int
+banset_preparsed_key(const struct x4b_rx_parse *parsed, union banset_key *key,
+		      u8 *family)
+{
+	/* HPFW has already bounds-checked these addresses against the raw frame. */
+	if (parsed->family == NFPROTO_IPV4) {
+		key->v4.src = parsed->addr.v4.src;
+		key->v4.dst = parsed->addr.v4.dst;
+		*family = NFPROTO_IPV4;
+		return 0;
+	}
+	if (parsed->family == NFPROTO_IPV6) {
+		key->v6.src = parsed->addr.v6.src;
+		key->v6.dst = parsed->addr.v6.dst;
+		*family = NFPROTO_IPV6;
+		return 0;
+	}
+	return -EAFNOSUPPORT;
+}
+
 static int banset_xdp_key(struct xdp_buff *xdp, union banset_key *key,
 			  u8 *family)
 {
@@ -2069,6 +2089,7 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 			       struct xdp_buff **xdps,
 			       const struct x4b_rx_frame *frames,
 			       struct net_device *frame_dev,
+			       const struct x4b_rx_parse *preparsed,
 			       struct x4b_rx_parse *parsed, u32 count,
 			       u32 refresh_threshold, u8 lookup_mode)
 {
@@ -2109,10 +2130,18 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 		table = set ? rcu_dereference_bh(set->table) : NULL;
 		if (table && table->family == NFPROTO_IPV4) {
 			for (i = 0; i < count; i++) {
-				if (banset_frame4_key(frames[i].data,
-						      frames[i].data_end,
-						      &scratch->keys[i],
-						      parsed ? &parsed[i] : NULL))
+				u8 family;
+
+				if (preparsed &&
+				    !banset_preparsed_key(&preparsed[i],
+							  &scratch->keys[i], &family) &&
+				    family == NFPROTO_IPV4) {
+					if (parsed)
+						parsed[i] = preparsed[i];
+				} else if (banset_frame4_key(
+						   frames[i].data, frames[i].data_end,
+						   &scratch->keys[i],
+						   parsed ? &parsed[i] : NULL))
 					break;
 				scratch->sets[i] = set;
 				scratch->tables[i] = table;
@@ -2132,10 +2161,17 @@ static u64 banset_native_batch(struct sk_buff **skbs,
 
 		if (frames) {
 			dev = frame_dev;
-			if (!dev || banset_frame_key(frames[i].data,
-						   frames[i].data_end,
-						   &scratch->keys[i], &family,
-						   parsed ? &parsed[i] : NULL))
+			if (!dev)
+				continue;
+			if (preparsed &&
+			    !banset_preparsed_key(&preparsed[i], &scratch->keys[i],
+						    &family)) {
+				if (parsed)
+					parsed[i] = preparsed[i];
+			} else if (banset_frame_key(frames[i].data,
+						    frames[i].data_end,
+						    &scratch->keys[i], &family,
+						    parsed ? &parsed[i] : NULL))
 				continue;
 		} else if (xdps) {
 			if (banset_xdp_key(xdps[i], &scratch->keys[i], &family) ||
@@ -2406,7 +2442,7 @@ parsed:
 u64 x4b_banset_match_skb_batch(struct sk_buff **packets, u32 count,
 				       u32 refresh_threshold, u8 lookup_mode)
 {
-	return banset_native_batch(packets, NULL, NULL, NULL, NULL, count,
+	return banset_native_batch(packets, NULL, NULL, NULL, NULL, NULL, count,
 				   refresh_threshold, lookup_mode);
 }
 EXPORT_SYMBOL_GPL(x4b_banset_match_skb_batch);
@@ -2414,7 +2450,7 @@ EXPORT_SYMBOL_GPL(x4b_banset_match_skb_batch);
 u64 x4b_banset_match_xdp_batch(struct xdp_buff **packets, u32 count,
 				       u32 refresh_threshold, u8 lookup_mode)
 {
-	return banset_native_batch(NULL, packets, NULL, NULL, NULL, count,
+	return banset_native_batch(NULL, packets, NULL, NULL, NULL, NULL, count,
 				   refresh_threshold, lookup_mode);
 }
 EXPORT_SYMBOL_GPL(x4b_banset_match_xdp_batch);
@@ -2423,8 +2459,9 @@ u64 x4b_banset_match_frame_batch(const struct x4b_rx_frame_batch *batch,
 					 struct x4b_rx_parse *parsed,
 					 u32 refresh_threshold, u8 lookup_mode)
 {
-	return banset_native_batch(NULL, NULL, batch->frames, batch->dev, parsed,
-				   batch->count, refresh_threshold, lookup_mode);
+	return banset_native_batch(NULL, NULL, batch->frames, batch->dev,
+				   batch->parsed, parsed, batch->count,
+				   refresh_threshold, lookup_mode);
 }
 EXPORT_SYMBOL_GPL(x4b_banset_match_frame_batch);
 
