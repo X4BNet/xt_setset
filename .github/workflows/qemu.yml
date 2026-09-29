@@ -25,6 +25,12 @@ jobs:
         with:
           submodules: false
 
+      - name: Test DKMS kernel policy
+        run: ./scripts/test-kernel-policy.sh
+
+      - name: Test DKMS installer lifecycle
+        run: ./scripts/test-install-dkms.sh
+
       - name: Checkout kernel-module-ci
         uses: actions/checkout@v6
         with:

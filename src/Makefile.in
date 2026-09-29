@@ -18,10 +18,16 @@ BPF_SYS_INCLUDES := -I/usr/include/$(shell $(CC) -dumpmachine)
 # https://www.kernel.org/doc/Documentation/kbuild/makefiles.txt
 X4B_SOURCE_COMMIT = @GIT_COMMIT@
 X4B_GIT_COMMIT := $(shell git -c safe.directory=$(abspath $(src)/..) -C $(src)/.. rev-parse --verify HEAD 2>/dev/null || echo $(X4B_SOURCE_COMMIT))
-obj-m = xt_setset.o xt_banset.o
+X4B_BUILD_BANSET ?= 1
+obj-m = xt_setset.o
+KERNEL_MODULES = xt_setset.ko
+ifeq ($(X4B_BUILD_BANSET),1)
+obj-m += xt_banset.o
+KERNEL_MODULES += xt_banset.ko
+endif
 ccflags-y = @KOPTS@ -DX4B_GIT_COMMIT='"$(X4B_GIT_COMMIT)"'
 
-all: xt_setset.ko xt_banset.ko libxt_setset.so libxt_banset.so libipset_hash_ipipflag.so x4b_banset_xdp.bpf.o
+all: $(KERNEL_MODULES) libxt_setset.so libxt_banset.so libipset_hash_ipipflag.so x4b_banset_xdp.bpf.o
 
 define build_kernel_modules
 	@btf_link="$(KDIR)/vmlinux"; created=0; \
@@ -101,12 +107,12 @@ Makefile: Makefile.in configure
 	./configure --make ${CARGS}
 
 load: all
-	-insmod xt_banset.ko
+	@if test "$(X4B_BUILD_BANSET)" = 1; then insmod xt_banset.ko; fi
 	-insmod xt_setset.ko
 
 unload:
 	-rmmod xt_setset.ko
-	-rmmod xt_banset.ko
+	@if test "$(X4B_BUILD_BANSET)" = 1; then rmmod xt_banset.ko || true; fi
 
 reload: unload load
 

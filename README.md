@@ -23,6 +23,10 @@ sudo make install
 
 DKMS (Dynamic Kernel Module Support) automatically rebuilds the kernel module when the kernel is upgraded.
 
+DKMS always builds `xt_setset`. It includes `xt_banset` only for Linux 6.12
+or newer; older kernels use the legacy `ip_set_hash_ipipflag` provider instead.
+For a non-DKMS build, set `X4B_BUILD_BANSET=0` to build only `xt_setset`.
+
 **Prerequisites:**
 - Install DKMS: `sudo apt-get install dkms` (Ubuntu/Debian) or equivalent for your distribution
 - Install kernel headers: `sudo apt-get install linux-headers-$(uname -r)`
@@ -103,8 +107,6 @@ separate `x4b_hpfw.ko` module. Keeping hook ownership out of this repository
 allows HPFW to enter an RCU-safe bypass before the banset control-plane module
 is reloaded. The optional XDP object remains available as a rollback path.
 
-The build probes the selected kernel with kbuild rather than inferring support
-from its release number. When the versioned HPFW headers and receive-hook ABI
-are absent, `xt_setset.ko`, `xt_banset.ko`, and their userspace plugins still
-build normally, but the HPFW provider and XDP kfunc are omitted from
-`xt_banset.ko`.
+Non-DKMS builds probe the selected kernel with kbuild. When the versioned HPFW
+headers and receive-hook ABI are absent, the HPFW provider and XDP kfunc are
+omitted from `xt_banset.ko`.
