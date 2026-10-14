@@ -13,11 +13,25 @@ on:
   schedule:
     - cron: "15 11 * * *"
   workflow_dispatch:
+    inputs:
+      docker_image:
+        description: "QEMU Docker image (blank uses the default)"
+        required: false
+        type: string
+        default: ""
+      kernel_url:
+        description: "linux-image .deb URL (blank uses the image kernel)"
+        required: false
+        type: string
+        default: ""
 
 concurrency: xt_setset-qemu
 
 jobs:
   qemu:
+    env:
+      KMOD_CI_QEMU_IMAGE: ${{ inputs.docker_image }}
+      KMOD_CI_KERNEL_URL: ${{ inputs.kernel_url }}
     runs-on: [self-hosted, linux, x4b, vmip]
     steps:
       - name: Checkout xt_setset
