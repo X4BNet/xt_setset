@@ -98,9 +98,12 @@ install_root="$SOURCE_ROOT/${MODULE_NAME}-$MVERSION"
 rm -rf "$install_root"
 mkdir -p "$install_root"
 cp -p ./*.[ch] Makefile.in configure dkms.conf check-banset-kernel.sh version.sh install-dkms.sh gen_compat_def "$install_root/"
+if [[ -f Makefile ]]; then
+  cp -p Makefile "$install_root/Makefile"
+fi
 chmod 0755 "$install_root/check-banset-kernel.sh" "$install_root/configure" "$install_root/install-dkms.sh" "$install_root/version.sh"
 
-rm -f "$install_root"/Makefile "$install_root"/Module.symvers "$install_root"/modules.order
+rm -f "$install_root"/Module.symvers "$install_root"/modules.order
 rm -f "$install_root"/*.ko "$install_root"/*.so "$install_root"/*_sh.o
 rm -f "$install_root"/*.o "$install_root"/*.cmd "$install_root"/.*.cmd "$install_root"/.*.o.d
 rm -f "$install_root"/*.mod "$install_root"/*.mod.c "$install_root"/*.mod.o
