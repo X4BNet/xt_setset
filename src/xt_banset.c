@@ -13,6 +13,10 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/random.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+#include <linux/prandom.h>
+#endif
 #include <linux/refcount.h>
 #include <linux/rcupdate.h>
 #include <linux/seqlock.h>
@@ -1666,7 +1670,7 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 	struct banset_table *table;
 	struct banset *set;
 	u32 cadt_flags = 0;
-	u32 maxelem = IPSET_DEFAULT_MAXELEM, capacity, seed;
+	u32 maxelem = IPSET_DEFAULT_MAXELEM, capacity, hashsize = 0, seed;
 
 	if (ipset->family != NFPROTO_IPV4 && ipset->family != NFPROTO_IPV6)
 		return -IPSET_ERR_INVALID_FAMILY;
@@ -1689,7 +1693,15 @@ static int banset_create(struct net *net, struct ip_set *ipset,
 	if (tb[IPSET_ATTR_MAXELEM])
 		maxelem = ip_set_get_h32(tb[IPSET_ATTR_MAXELEM]);
 	maxelem = clamp_t(u32, maxelem, BANSET_SLOTS, BANSET_MAX_CAPACITY);
-	capacity = min_t(u32, maxelem, BANSET_INITIAL_CAPACITY);
+	if (tb[IPSET_ATTR_HASHSIZE])
+		hashsize = ip_set_get_h32(tb[IPSET_ATTR_HASHSIZE]);
+	/* High-rate batch writers cannot wait for an asynchronous cuckoo-table
+	 * resize after a locally full pair of buckets.  Honour the configured
+	 * initial size (expressed in slots by X4B.FW), capped by maxelem; callers
+	 * that omit it retain the memory-conservative initial allocation.
+	 */
+	capacity = hashsize ? min(maxelem, max(hashsize, (u32)BANSET_SLOTS)) :
+		min_t(u32, maxelem, BANSET_INITIAL_CAPACITY);
 	get_random_bytes(&seed, sizeof(seed));
 	table = banset_table_create(ipset->family, capacity, seed);
 	if (!table)
@@ -2465,6 +2477,44 @@ u64 x4b_banset_match_frame_batch(const struct x4b_rx_frame_batch *batch,
 }
 EXPORT_SYMBOL_GPL(x4b_banset_match_frame_batch);
 
+int x4b_banset_add_frame_batch(const struct x4b_rx_frame_batch *batch,
+			       u64 hit_mask, u32 timeout, u8 flag)
+{
+	u64 valid_mask;
+	int failures = 0;
+	u32 i;
+
+	if (!batch || !batch->dev || !batch->parsed || !batch->count ||
+	    batch->count > X4B_BANSET_NATIVE_MAX_BATCH ||
+	    !timeout || timeout > BANSET_MAX_TIMEOUT)
+		return -EINVAL;
+	valid_mask = batch->count == 64 ? U64_MAX : BIT_ULL(batch->count) - 1;
+	hit_mask &= valid_mask;
+
+	rcu_read_lock_bh();
+	for (i = 0; i < batch->count; i++) {
+		const struct x4b_rx_parse *parsed = &batch->parsed[i];
+		union banset_key key = {};
+		struct banset *set;
+		const char *name;
+		u8 family;
+
+		if (!(hit_mask & BIT_ULL(i)))
+			continue;
+		if (banset_preparsed_key(parsed, &key, &family)) {
+			failures++;
+			continue;
+		}
+		name = family == NFPROTO_IPV4 ? "ban" : "ban6";
+		set = banset_find_binding_rcu(name, family, dev_net(batch->dev));
+		if (!set || banset_upsert(set, &key, flag, timeout, true))
+			failures++;
+	}
+	rcu_read_unlock_bh();
+	return failures;
+}
+EXPORT_SYMBOL_GPL(x4b_banset_add_frame_batch);
+
 u64 x4b_banset_native_seq_retries(void)
 {
 	return atomic64_read(&native_seq_retries);
@@ -2510,12 +2560,20 @@ static u64 banset_hpfw_match_frame_batch(
 	return x4b_banset_match_frame_batch(batch, NULL, refresh_threshold, 0);
 }
 
+static int banset_hpfw_add_frame_batch(
+	const struct x4b_rx_frame_batch *batch, u64 hit_mask,
+	u32 timeout, u8 flag)
+{
+	return x4b_banset_add_frame_batch(batch, hit_mask, timeout, flag);
+}
+
 static const struct x4b_hpfw_banset_provider banset_hpfw_provider = {
 	.abi_version = X4B_HPFW_PROVIDER_ABI_V1,
 	.struct_size = sizeof(struct x4b_hpfw_banset_provider),
 	.match_frame_batch = banset_hpfw_match_frame_batch,
 	.seq_retries = x4b_banset_native_seq_retries,
 	.refreshes = x4b_banset_native_refreshes,
+	.add_frame_batch = banset_hpfw_add_frame_batch,
 };
 
 const struct x4b_hpfw_banset_provider *x4b_banset_hpfw_provider(void)

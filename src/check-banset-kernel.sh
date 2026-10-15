@@ -16,6 +16,5 @@ esac
 if [ "$kernel_major" -lt 6 ] || {
      [ "$kernel_major" -eq 6 ] && [ "$kernel_minor" -lt 12 ];
    }; then
-  echo "xt_banset: Linux 6.12 or newer is required (found $kernel_release)" >&2
   exit 1
 fi

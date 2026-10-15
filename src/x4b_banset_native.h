@@ -33,6 +33,8 @@ u64 x4b_banset_match_xdp_batch(struct xdp_buff **packets, u32 count,
 u64 x4b_banset_match_frame_batch(const struct x4b_rx_frame_batch *batch,
 					 struct x4b_rx_parse *parsed,
 					 u32 refresh_threshold, u8 lookup_mode);
+int x4b_banset_add_frame_batch(const struct x4b_rx_frame_batch *batch,
+			       u64 hit_mask, u32 timeout, u8 flag);
 u64 x4b_banset_native_seq_retries(void);
 u64 x4b_banset_native_refreshes(void);
 void x4b_banset_native_timing_read(struct x4b_banset_native_timing *timing);
