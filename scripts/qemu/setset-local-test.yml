@@ -12,6 +12,25 @@
         modprobe xt_banset
         iptables -m banset -h | grep -q -- '--ban-set'
 
+    - name: load and pin banset XDP kfunc probe
+      shell: |
+        set -euo pipefail
+        source=/tmp/xt-setset-local-build/scripts/qemu/x4b_banset_kfunc_ci.bpf.c
+        object=/tmp/x4b_banset_kfunc_ci.bpf.o
+        pin=/sys/fs/bpf/x4b_banset_kfunc_ci
+        cleanup() {
+          rm -f "$pin" "$object"
+        }
+        trap cleanup EXIT
+        mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf
+        clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
+          -I/usr/include/$(gcc -dumpmachine) -Wall -Werror \
+          -c "$source" -o "$object"
+        bpftool prog load "$object" "$pin" type xdp
+        bpftool prog show pinned "$pin" | grep -q x4b_banset_kf
+      args:
+        executable: /bin/bash
+
     - name: test setset rule parsing
       shell: |
         set -e
