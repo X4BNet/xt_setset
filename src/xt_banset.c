@@ -2621,7 +2621,11 @@ out_rcu:
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(x4b_banset_kfunc_ids)
+#ifdef KF_TRUSTED_ARGS
 BTF_ID_FLAGS(func, bpf_x4b_banset_match, KF_TRUSTED_ARGS)
+#else
+BTF_ID_FLAGS(func, bpf_x4b_banset_match)
+#endif
 BTF_KFUNCS_END(x4b_banset_kfunc_ids)
 
 static const struct btf_kfunc_id_set x4b_banset_kfunc_set = {

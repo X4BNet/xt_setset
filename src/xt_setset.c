@@ -60,7 +60,7 @@ setset_probability(__u32 nth){
 static bool
 setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 {
-	const struct xt_setset_info_target *info = par->targinfo;
+	struct xt_setset_info_target *info = (void *)par->targinfo;
 	struct sk_buff *skb = (struct sk_buff *)_skb;
 	bool ret = true, create = true;
 	int err;
@@ -100,7 +100,7 @@ setset_match(const struct sk_buff *_skb, struct xt_action_param *par)
 				add_opt.ext.packets = 0;
 			}
 			if(info->ssflags & SS_FLAG){
-				add_opt.ext.comment = (char *)info->flag;
+				add_opt.ext.comment = (char *)(unsigned long)info->flag;
 			}
 
 			add_opt.cmdflags |= IPSET_FLAG_EXIST;
