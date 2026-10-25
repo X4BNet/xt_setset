@@ -61,6 +61,9 @@ jobs:
       - name: Allow sudo in runner
         run: echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
 
+      - name: Test QEMU container cleanup
+        run: python3 -m unittest discover -s ci/kernel-module-ci/tests -p test_qemu_container_cleanup.py -v
+
       - name: Log in to Docker Hub
         run: echo '${{ secrets.dockerhub_token }}' | docker login -u x4bnet --password-stdin
 
